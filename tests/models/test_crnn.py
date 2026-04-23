@@ -1,0 +1,46 @@
+"""Tests for :mod:`moxify_ocr.models.crnn`."""
+
+from __future__ import annotations
+
+import numpy as np
+import tensorflow as tf
+
+from moxify_ocr.models.crnn import build_crnn
+
+
+def test_output_shape() -> None:
+    """A single uint8 (48, 256, 3) input produces rank-3 logits of width num_classes."""
+    model = build_crnn(input_shape=(48, 256, 3), num_classes=45, lstm_units=96)
+    dummy = np.zeros((1, 48, 256, 3), dtype=np.uint8)
+    output = model(dummy, training=False)
+    assert output.shape.rank == 3
+    batch, _time, classes = output.shape
+    assert batch == 1
+    assert classes == 45
+
+
+def test_time_dim_proportional_to_width() -> None:
+    """Output time dimension T is approximately W / 8 for MobileNetV3-Small."""
+    model = build_crnn(input_shape=(48, 256, 3), num_classes=45, lstm_units=96)
+    dummy = np.zeros((1, 48, 256, 3), dtype=np.uint8)
+    output = model(dummy, training=False)
+    time_steps = int(output.shape[1])
+    # Three halving stages: 256 -> 128 -> 64 -> 32. Allow a little slack for
+    # backbone-version drift.
+    assert 24 <= time_steps <= 40
+
+
+def test_param_count_reasonable() -> None:
+    """Total trainable params sit in the [100k, 2M] range — small CRNN."""
+    model = build_crnn(input_shape=(48, 256, 3), num_classes=45, lstm_units=96)
+    params = int(model.count_params())
+    assert 100_000 <= params <= 2_000_000, f"got {params} params"
+
+
+def test_accepts_uint8_input() -> None:
+    """Feeding a uint8 tensor works end-to-end without a dtype error."""
+    model = build_crnn(input_shape=(48, 256, 3), num_classes=45, lstm_units=96)
+    dummy = tf.zeros((2, 48, 256, 3), dtype=tf.uint8)
+    output = model(dummy, training=False)
+    assert output.dtype == tf.float32
+    assert int(output.shape[0]) == 2

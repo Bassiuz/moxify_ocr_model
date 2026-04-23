@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from typing import Any, cast
 
 import requests
 
@@ -26,6 +27,11 @@ _REQUEST_HEADERS = {
     "User-Agent": USER_AGENT,
     "Accept": "application/json",
 }
+
+#: Layouts we cannot meaningfully train on — skip their image downloads.
+_SKIP_LAYOUTS = frozenset(
+    {"art_series", "token", "double_faced_token", "scheme", "plane", "phenomenon"}
+)
 
 
 def fetch_default_cards_path(cache_dir: Path, max_age_days: int) -> Path:
@@ -68,6 +74,53 @@ def _find_default_cards_uri() -> str:
                 "Scryfall bulk-data index contains a default_cards entry without a download_uri."
             )
     raise LookupError("Scryfall bulk-data index has no default_cards entry.")
+
+
+def download_card_image(card: dict[str, Any], cache_dir: Path) -> Path | None:
+    """Download a Scryfall card's front-face image into ``cache_dir``.
+
+    Returns the local path to the cached JPG, or ``None`` if the card's layout
+    is skipped or no usable image URL is present. The file is written to
+    ``<cache_dir>/<first-two-of-id>/<id>.jpg`` and the download is skipped if
+    that path already exists.
+    """
+    if card.get("layout") in _SKIP_LAYOUTS:
+        return None
+
+    card_id = card.get("id")
+    if not isinstance(card_id, str) or not card_id:
+        return None
+
+    image_url = _pick_image_url(card)
+    if image_url is None:
+        return None
+
+    target = cache_dir / card_id[:2] / f"{card_id}.jpg"
+    if target.exists():
+        return target
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    time.sleep(_RATE_LIMIT_SLEEP_S)
+    response = requests.get(image_url, headers=_REQUEST_HEADERS, timeout=30)
+    response.raise_for_status()
+    target.write_bytes(response.content)
+    return target
+
+
+def _pick_image_url(card: dict[str, Any]) -> str | None:
+    image_uris = card.get("image_uris")
+    if not isinstance(image_uris, dict):
+        faces = card.get("card_faces")
+        if isinstance(faces, list) and faces and isinstance(faces[0], dict):
+            front = cast(dict[str, Any], faces[0])
+            image_uris = front.get("image_uris")
+    if not isinstance(image_uris, dict):
+        return None
+    for key in ("large", "normal"):
+        value = image_uris.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
 
 
 def _stream_download(url: str, dest: Path) -> None:

@@ -194,9 +194,17 @@ def _make_generator(
         for idx, entry in enumerate(entries):
             card = _entry_to_card(entry)
             label = make_label(card, is_foil=False)
-            label_ids = np.asarray(encode_label(label), dtype=np.int32)
+            try:
+                label_ids = np.asarray(encode_label(label), dtype=np.int32)
+            except ValueError:
+                # Label contains characters outside the alphabet (promo suffixes
+                # like "268p", foreign collector-number marks). Skip.
+                continue
             image_path = images_root / entry.image_path
-            image = _load_and_crop(image_path, target_size)
+            try:
+                image = _load_and_crop(image_path, target_size)
+            except FileNotFoundError:
+                continue
             if pipeline is not None:
                 image = apply_augmentation(image, pipeline, seed=seed * 1_000_003 + idx)
             yield image, label_ids, np.int32(len(label_ids))

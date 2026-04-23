@@ -31,6 +31,25 @@ _DEFAULT_MAX_AGE_DAYS = 7
 #: Print a progress line every N processed cards.
 _PROGRESS_EVERY = 100
 
+#: Only ingest cards released on or after this date (M15 core set, 2014-07-18).
+#: Older cards often lack the modern bottom-identifier format.
+_MIN_RELEASE_DATE = "2014-07-18"
+
+
+def _is_ingestable(card: dict[str, Any]) -> bool:
+    """Return True iff this card has the modern bottom-identifier format.
+
+    Excludes:
+    - Digital-only cards (Arena/MTGO exclusives) — ``digital == True``
+    - Cards released before M15 (2014-07-18)
+    """
+    if card.get("digital") is True:
+        return False
+    released_at = card.get("released_at")
+    if not isinstance(released_at, str) or released_at < _MIN_RELEASE_DATE:
+        return False
+    return True
+
 
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point. Returns the process exit code."""
@@ -84,6 +103,10 @@ def _run_ingest(out_dir: Path, limit: int | None, max_age_days: int) -> int:
 
         card_id = card.get("id")
         if not isinstance(card_id, str) or not card_id:
+            skipped += 1
+            continue
+
+        if not _is_ingestable(card):
             skipped += 1
             continue
 

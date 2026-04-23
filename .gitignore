@@ -6,15 +6,15 @@ __pycache__/
 .pytest_cache/
 .DS_Store
 
-# gitignored data — see README
-data/
-artifacts/
-.tensorboard/
+# gitignored data — see README (root-anchored so they don't match src/moxify_ocr/data/, etc.)
+/data/
+/artifacts/
+/.tensorboard/
 
 # ML/TF run outputs
-logs/
+/logs/
 *.tfevents.*
-wandb/
+/wandb/
 .ipynb_checkpoints/
 
 # Model artifacts outside artifacts/

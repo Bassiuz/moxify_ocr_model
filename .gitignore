@@ -10,3 +10,25 @@ __pycache__/
 data/
 artifacts/
 .tensorboard/
+
+# ML/TF run outputs
+logs/
+*.tfevents.*
+wandb/
+.ipynb_checkpoints/
+
+# Model artifacts outside artifacts/
+*.h5
+*.keras
+*.tflite
+*.onnx
+*.pb
+
+# Build output
+*.egg-info/
+build/
+dist/
+
+# Local env
+.env
+.env.local

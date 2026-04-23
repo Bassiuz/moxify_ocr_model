@@ -1,3 +1,6 @@
+> **SUPERSEDED** for Phase 1 by [`docs/plans/2026-04-23-bottom-region-extractor-design.md`](docs/plans/2026-04-23-bottom-region-extractor-design.md).
+> This document remains the authority for Phase 2 (Latin name model), Phase 3 (Japanese name model), and the shared training infrastructure.
+
 # Custom OCR Training Project — Design & Handoff
 
 **Status:** Design — ready to start as a new standalone project

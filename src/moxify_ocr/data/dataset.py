@@ -193,12 +193,13 @@ def _make_generator(
     def gen() -> Iterator[tuple[np.ndarray, np.ndarray, np.int32]]:
         for idx, entry in enumerate(entries):
             card = _entry_to_card(entry)
-            label = make_label(card, is_foil=False)
             try:
+                label = make_label(card, is_foil=False)
                 label_ids = np.asarray(encode_label(label), dtype=np.int32)
-            except ValueError:
-                # Label contains characters outside the alphabet (promo suffixes
-                # like "268p", foreign collector-number marks). Skip.
+            except (ValueError, KeyError):
+                # Skip rows we can't encode: unsupported languages (e.g. 'qya'
+                # Quenya), promo collector-number suffixes like '268p', or
+                # other characters outside the uppercase CTC alphabet.
                 continue
             image_path = images_root / entry.image_path
             try:

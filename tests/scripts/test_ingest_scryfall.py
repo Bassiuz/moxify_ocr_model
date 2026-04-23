@@ -20,6 +20,16 @@ from scripts.ingest_scryfall import main
 _DUMMY_JPEG = b"0123456789"  # 10 bytes — content doesn't matter, just its hash.
 _DUMMY_JPEG_SHA256 = hashlib.sha256(_DUMMY_JPEG).hexdigest()
 
+# Small fixture mirroring the shape of Scryfall's /sets response.
+_SETS_FIXTURE: dict[str, Any] = {
+    "data": [
+        {"code": "clu", "printed_size": 500},
+        {"code": "sld", "printed_size": 100},
+        # A set with no printed_size — e.g. a digital-only or token product.
+        {"code": "digi"},
+    ]
+}
+
 
 def _normal_card(card_id: str, *, set_code: str = "clu", collector_number: str = "0001") -> dict[str, Any]:
     return {
@@ -32,6 +42,7 @@ def _normal_card(card_id: str, *, set_code: str = "clu", collector_number: str =
         "type_line": "Creature — Elf",
         "finishes": ["nonfoil", "foil"],
         "image_uris": {"large": f"https://scry/{card_id}-l.jpg"},
+        "released_at": "2024-02-09",
     }
 
 
@@ -61,6 +72,18 @@ def _fake_fetch(bulk_json: Path) -> Any:
     return _inner
 
 
+def _fake_fetch_sets(sets_json: Path) -> Any:
+    def _inner(cache_dir: Path, max_age_days: int) -> Path:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        return sets_json
+
+    return _inner
+
+
+def _write_sets_fixture(path: Path) -> None:
+    path.write_text(json.dumps(_SETS_FIXTURE))
+
+
 def _fake_download_factory(out_dir: Path) -> Any:
     """Write a dummy JPEG for non-skipped cards, return None for art_series."""
 
@@ -80,6 +103,7 @@ def _fake_download_factory(out_dir: Path) -> Any:
 
 def test_cli_end_to_end_with_mocks(tmp_path: Path) -> None:
     bulk_json = tmp_path / "default-cards.json"
+    sets_json = tmp_path / "sets.json"
     cards = [
         _normal_card("aaaa1111", collector_number="0001"),
         _normal_card("bbbb2222", collector_number="0002"),
@@ -88,11 +112,16 @@ def test_cli_end_to_end_with_mocks(tmp_path: Path) -> None:
         _normal_card("eeee5555", collector_number="0005"),
     ]
     _write_bulk_fixture(bulk_json, cards)
+    _write_sets_fixture(sets_json)
 
     with (
         patch(
             "scripts.ingest_scryfall.fetch_default_cards_path",
             side_effect=_fake_fetch(bulk_json),
+        ),
+        patch(
+            "scripts.ingest_scryfall.fetch_sets_path",
+            side_effect=_fake_fetch_sets(sets_json),
         ),
         patch(
             "scripts.ingest_scryfall.download_card_image",
@@ -118,17 +147,62 @@ def test_cli_end_to_end_with_mocks(tmp_path: Path) -> None:
         assert row.layout == "normal"
         assert row.finishes == ["nonfoil", "foil"]
         assert row.type_line == "Creature — Elf"
+        # New schema fields: released_at comes from the card dict,
+        # printed_size is looked up by set_code in the sets fixture.
+        assert row.released_at == "2024-02-09"
+        assert row.printed_size == 500
 
 
-def test_cli_respects_limit(tmp_path: Path) -> None:
+def test_cli_populates_printed_size_from_sets_index(tmp_path: Path) -> None:
+    """Cards whose set has no ``printed_size`` in the index get ``None``."""
     bulk_json = tmp_path / "default-cards.json"
-    cards = [_normal_card(f"id{i:06d}aaaa", collector_number=str(i)) for i in range(5)]
+    sets_json = tmp_path / "sets.json"
+    cards = [
+        _normal_card("aaaa1111", set_code="clu", collector_number="0001"),
+        _normal_card("bbbb2222", set_code="digi", collector_number="0002"),
+        _normal_card("cccc3333", set_code="unknown", collector_number="0003"),
+    ]
     _write_bulk_fixture(bulk_json, cards)
+    _write_sets_fixture(sets_json)
 
     with (
         patch(
             "scripts.ingest_scryfall.fetch_default_cards_path",
             side_effect=_fake_fetch(bulk_json),
+        ),
+        patch(
+            "scripts.ingest_scryfall.fetch_sets_path",
+            side_effect=_fake_fetch_sets(sets_json),
+        ),
+        patch(
+            "scripts.ingest_scryfall.download_card_image",
+            side_effect=_fake_download_factory(tmp_path),
+        ),
+    ):
+        rc = main(["--out", str(tmp_path)])
+
+    assert rc == 0
+    rows = {row.scryfall_id: row for row in read_manifest(tmp_path / "manifest.jsonl")}
+    assert rows["aaaa1111"].printed_size == 500
+    assert rows["bbbb2222"].printed_size is None  # in sets index but no printed_size.
+    assert rows["cccc3333"].printed_size is None  # set code not in sets index at all.
+
+
+def test_cli_respects_limit(tmp_path: Path) -> None:
+    bulk_json = tmp_path / "default-cards.json"
+    sets_json = tmp_path / "sets.json"
+    cards = [_normal_card(f"id{i:06d}aaaa", collector_number=str(i)) for i in range(5)]
+    _write_bulk_fixture(bulk_json, cards)
+    _write_sets_fixture(sets_json)
+
+    with (
+        patch(
+            "scripts.ingest_scryfall.fetch_default_cards_path",
+            side_effect=_fake_fetch(bulk_json),
+        ),
+        patch(
+            "scripts.ingest_scryfall.fetch_sets_path",
+            side_effect=_fake_fetch_sets(sets_json),
         ),
         patch(
             "scripts.ingest_scryfall.download_card_image",
@@ -144,12 +218,14 @@ def test_cli_respects_limit(tmp_path: Path) -> None:
 
 def test_cli_skips_already_in_manifest(tmp_path: Path) -> None:
     bulk_json = tmp_path / "default-cards.json"
+    sets_json = tmp_path / "sets.json"
     cards = [
         _normal_card("id000001aaaa"),
         _normal_card("id000002bbbb"),
         _normal_card("id000003cccc"),
     ]
     _write_bulk_fixture(bulk_json, cards)
+    _write_sets_fixture(sets_json)
 
     # Pre-seed the manifest with the second card.
     manifest_path = tmp_path / "manifest.jsonl"
@@ -179,6 +255,10 @@ def test_cli_skips_already_in_manifest(tmp_path: Path) -> None:
             side_effect=_fake_fetch(bulk_json),
         ),
         patch(
+            "scripts.ingest_scryfall.fetch_sets_path",
+            side_effect=_fake_fetch_sets(sets_json),
+        ),
+        patch(
             "scripts.ingest_scryfall.download_card_image",
             side_effect=tracking_download,
         ),
@@ -200,13 +280,19 @@ def test_cli_skips_already_in_manifest(tmp_path: Path) -> None:
 
 def test_cli_skipped_layouts_not_in_manifest(tmp_path: Path) -> None:
     bulk_json = tmp_path / "default-cards.json"
+    sets_json = tmp_path / "sets.json"
     cards = [_art_series_card("zzzz9999")]
     _write_bulk_fixture(bulk_json, cards)
+    _write_sets_fixture(sets_json)
 
     with (
         patch(
             "scripts.ingest_scryfall.fetch_default_cards_path",
             side_effect=_fake_fetch(bulk_json),
+        ),
+        patch(
+            "scripts.ingest_scryfall.fetch_sets_path",
+            side_effect=_fake_fetch_sets(sets_json),
         ),
         patch(
             "scripts.ingest_scryfall.download_card_image",

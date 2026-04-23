@@ -125,6 +125,8 @@ def test_roundtrip_preserves_all_fields(tmp_path: Path) -> None:
         layout="transform",
         finishes=["foil", "nonfoil", "etched"],
         image_sha256="0123456789abcdef" * 4,
+        released_at="2022-02-18",
+        printed_size=512,
     )
 
     append_manifest_entry(manifest_path, entry)
@@ -142,4 +144,60 @@ def test_roundtrip_preserves_all_fields(tmp_path: Path) -> None:
     assert got.layout == "transform"
     assert got.finishes == ["foil", "nonfoil", "etched"]
     assert got.image_sha256 == "0123456789abcdef" * 4
+    assert got.released_at == "2022-02-18"
+    assert got.printed_size == 512
     assert got == entry
+
+
+def test_roundtrip_preserves_new_fields_with_none_printed_size(tmp_path: Path) -> None:
+    """``printed_size`` can legitimately be ``None`` (e.g. digital-only sets)."""
+    manifest_path = tmp_path / "manifest.jsonl"
+    entry = _make_entry()
+    # _make_entry defaults to released_at="" and printed_size=None.
+    entry_with_date = ManifestEntry(
+        scryfall_id=entry.scryfall_id,
+        image_path=entry.image_path,
+        lang=entry.lang,
+        set_code=entry.set_code,
+        collector_number=entry.collector_number,
+        rarity=entry.rarity,
+        type_line=entry.type_line,
+        layout=entry.layout,
+        finishes=entry.finishes,
+        image_sha256=entry.image_sha256,
+        released_at="2024-02-09",
+        printed_size=None,
+    )
+
+    append_manifest_entry(manifest_path, entry_with_date)
+    [got] = list(read_manifest(manifest_path))
+
+    assert got.released_at == "2024-02-09"
+    assert got.printed_size is None
+    assert got == entry_with_date
+
+
+def test_read_defaults_missing_new_fields(tmp_path: Path) -> None:
+    """Rows written before the schema gained ``released_at``/``printed_size``
+    must still parse, with the new fields defaulting to ``""`` and ``None``.
+    """
+    manifest_path = tmp_path / "manifest.jsonl"
+    legacy_row = {
+        "scryfall_id": "legacy-id",
+        "image_path": "le/legacy-id.jpg",
+        "lang": "en",
+        "set_code": "clu",
+        "collector_number": "0001",
+        "rarity": "common",
+        "type_line": "Creature — Elf",
+        "layout": "normal",
+        "finishes": ["nonfoil"],
+        "image_sha256": "ab" * 32,
+    }
+    manifest_path.write_text(json.dumps(legacy_row) + "\n", encoding="utf-8")
+
+    [got] = list(read_manifest(manifest_path))
+
+    assert got.scryfall_id == "legacy-id"
+    assert got.released_at == ""
+    assert got.printed_size is None

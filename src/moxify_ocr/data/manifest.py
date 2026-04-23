@@ -26,6 +26,8 @@ class ManifestEntry:
     layout: str
     finishes: list[str]
     image_sha256: str
+    released_at: str = ""
+    printed_size: int | None = None
 
 
 def append_manifest_entry(manifest_path: Path, entry: ManifestEntry) -> None:
@@ -44,7 +46,10 @@ def append_manifest_entry(manifest_path: Path, entry: ManifestEntry) -> None:
 def read_manifest(manifest_path: Path) -> Iterator[ManifestEntry]:
     """Yield ``ManifestEntry`` objects, one per JSONL line.
 
-    Raises ``FileNotFoundError`` if ``manifest_path`` does not exist.
+    Tolerant of rows missing newer optional fields (``released_at``,
+    ``printed_size``): such rows read back with the ``ManifestEntry`` defaults
+    (``""`` and ``None`` respectively). Raises ``FileNotFoundError`` if
+    ``manifest_path`` does not exist.
     """
     with manifest_path.open("r", encoding="utf-8") as handle:
         for line in handle:
@@ -52,6 +57,8 @@ def read_manifest(manifest_path: Path) -> Iterator[ManifestEntry]:
             if not stripped:
                 continue
             payload = json.loads(stripped)
+            payload.setdefault("released_at", "")
+            payload.setdefault("printed_size", None)
             yield ManifestEntry(**payload)
 
 

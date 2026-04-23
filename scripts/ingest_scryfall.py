@@ -19,7 +19,11 @@ from pathlib import Path
 from typing import Any
 
 from moxify_ocr.data.manifest import ManifestEntry, append_manifest_entry, manifest_has
-from moxify_ocr.data.scryfall import download_card_image, fetch_default_cards_path
+from moxify_ocr.data.scryfall import (
+    download_card_image,
+    fetch_default_cards_path,
+    fetch_sets_path,
+)
 
 #: Default cache freshness in days — matches the Scryfall bulk-data refresh cadence.
 _DEFAULT_MAX_AGE_DAYS = 7
@@ -65,6 +69,8 @@ def _run_ingest(out_dir: Path, limit: int | None, max_age_days: int) -> int:
     manifest_path = out_dir / "manifest.jsonl"
 
     bulk_path = fetch_default_cards_path(cache_dir=out_dir, max_age_days=max_age_days)
+    sets_path = fetch_sets_path(cache_dir=out_dir, max_age_days=max_age_days)
+    sets_index = _load_sets_index(sets_path)
     with bulk_path.open("r", encoding="utf-8") as handle:
         cards: list[dict[str, Any]] = json.load(handle)
 
@@ -92,7 +98,7 @@ def _run_ingest(out_dir: Path, limit: int | None, max_age_days: int) -> int:
             _maybe_print_progress(index, total, skipped)
             continue
 
-        entry = _build_entry(card, image_path, out_dir)
+        entry = _build_entry(card, image_path, out_dir, sets_index)
         append_manifest_entry(manifest_path, entry)
         added += 1
         _maybe_print_progress(index, total, skipped)
@@ -104,7 +110,12 @@ def _run_ingest(out_dir: Path, limit: int | None, max_age_days: int) -> int:
     return 0
 
 
-def _build_entry(card: dict[str, Any], image_path: Path, out_dir: Path) -> ManifestEntry:
+def _build_entry(
+    card: dict[str, Any],
+    image_path: Path,
+    out_dir: Path,
+    sets_index: dict[str, int],
+) -> ManifestEntry:
     finishes_raw = card.get("finishes", [])
     finishes: list[str] = (
         [f for f in finishes_raw if isinstance(f, str)] if isinstance(finishes_raw, list) else []
@@ -113,22 +124,47 @@ def _build_entry(card: dict[str, Any], image_path: Path, out_dir: Path) -> Manif
         rel_image = image_path.relative_to(out_dir)
     except ValueError:
         rel_image = image_path
+    set_code = _as_str(card.get("set"))
+    printed_size = sets_index.get(set_code.lower()) if set_code else None
     return ManifestEntry(
         scryfall_id=_as_str(card.get("id")),
         image_path=str(rel_image),
         lang=_as_str(card.get("lang")),
-        set_code=_as_str(card.get("set")),
+        set_code=set_code,
         collector_number=_as_str(card.get("collector_number")),
         rarity=_as_str(card.get("rarity")),
         type_line=_as_str(card.get("type_line")),
         layout=_as_str(card.get("layout")),
         finishes=finishes,
         image_sha256=_sha256_file(image_path),
+        released_at=_as_str(card.get("released_at")),
+        printed_size=printed_size,
     )
 
 
 def _as_str(value: Any) -> str:
     return value if isinstance(value, str) else ""
+
+
+def _load_sets_index(sets_path: Path) -> dict[str, int]:
+    """Parse the cached ``sets.json`` into a ``{set_code_lower: printed_size}`` map.
+
+    Entries missing ``printed_size`` are omitted (not stored as ``None``); the
+    caller treats an absent key as "unknown", matching Scryfall's semantics for
+    digital-only sets and token products.
+    """
+    with sets_path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    entries = payload.get("data", []) if isinstance(payload, dict) else []
+    result: dict[str, int] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        code = entry.get("code")
+        printed_size = entry.get("printed_size")
+        if isinstance(code, str) and isinstance(printed_size, int):
+            result[code.lower()] = printed_size
+    return result
 
 
 def _sha256_file(path: Path) -> str:

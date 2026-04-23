@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from moxify_ocr.data.scryfall import fetch_default_cards_path
+from moxify_ocr.data.scryfall import fetch_default_cards_path, fetch_sets_path
 
 from .conftest import _mock_response
 
@@ -108,3 +108,29 @@ def test_fetch_sends_polite_user_agent(tmp_path: Path) -> None:
         user_agent = headers.get("User-Agent")
         assert user_agent is not None
         assert "moxify-ocr" in user_agent.lower()
+
+
+def test_fetch_sets_uses_cache_when_fresh(tmp_path: Path) -> None:
+    cached = tmp_path / "sets.json"
+    cached.write_text(json.dumps({"data": [{"code": "blb", "printed_size": 281}]}))
+    with patch("moxify_ocr.data.scryfall.requests.get") as mock_get:
+        result = fetch_sets_path(cache_dir=tmp_path, max_age_days=7)
+    mock_get.assert_not_called()
+    assert result == cached
+
+
+def test_fetch_sets_downloads_when_missing(tmp_path: Path) -> None:
+    sets_payload = {"data": [{"code": "blb", "printed_size": 281}]}
+    with patch("moxify_ocr.data.scryfall.requests.get") as mock_get:
+        mock_get.side_effect = [
+            _mock_response(content=json.dumps(sets_payload).encode("utf-8")),
+        ]
+        path = fetch_sets_path(cache_dir=tmp_path, max_age_days=7)
+    assert path.exists()
+    assert path == tmp_path / "sets.json"
+    assert json.loads(path.read_text()) == sets_payload
+    assert mock_get.call_count == 1
+    # User-Agent sanity check.
+    headers = mock_get.call_args_list[0].kwargs.get("headers")
+    assert headers is not None
+    assert "moxify-ocr" in headers.get("User-Agent", "").lower()

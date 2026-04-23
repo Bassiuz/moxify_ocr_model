@@ -11,11 +11,17 @@ import requests
 #: Scryfall bulk-data index endpoint.
 BULK_DATA_INDEX_URL = "https://api.scryfall.com/bulk-data"
 
+#: Scryfall sets index endpoint — small JSON (< 500 KB), one entry per set.
+SETS_INDEX_URL = "https://api.scryfall.com/sets"
+
 #: Polite User-Agent identifying this project to Scryfall (per their API guidelines).
 USER_AGENT = "moxify-ocr/0.1 (https://github.com/Bassiuz/moxify_ocr_model)"
 
 #: File name used for the cached `default_cards` bulk JSON.
 DEFAULT_CARDS_FILENAME = "default-cards.json"
+
+#: File name used for the cached `/sets` index JSON.
+SETS_FILENAME = "sets.json"
 
 #: Chunk size for streaming the bulk JSON (~1 MiB).
 _DOWNLOAD_CHUNK_SIZE = 1 << 20
@@ -50,6 +56,26 @@ def fetch_default_cards_path(cache_dir: Path, max_age_days: int) -> Path:
     download_uri = _find_default_cards_uri()
     time.sleep(_RATE_LIMIT_SLEEP_S)
     _stream_download(download_uri, target)
+    return target
+
+
+def fetch_sets_path(cache_dir: Path, max_age_days: int) -> Path:
+    """Return the local path to Scryfall's ``/sets`` index JSON.
+
+    Downloads the file into ``cache_dir`` if the cached copy is missing or older
+    than ``max_age_days``. The payload is small (< 500 KB) so we just write the
+    full response body in one shot rather than streaming it.
+    """
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    target = cache_dir / SETS_FILENAME
+
+    if _is_cache_fresh(target, max_age_days):
+        return target
+
+    time.sleep(_RATE_LIMIT_SLEEP_S)
+    response = requests.get(SETS_INDEX_URL, headers=_REQUEST_HEADERS, timeout=30)
+    response.raise_for_status()
+    target.write_bytes(response.content)
     return target
 
 

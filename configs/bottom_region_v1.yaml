@@ -1,0 +1,19 @@
+data:
+  manifest: data/scryfall/manifest.jsonl
+  images_root: data/scryfall
+  batch_size: 192
+  shuffle_buffer: 1024
+  min_release: "2008-01-01"
+
+model:
+  input_height: 48
+  input_width: 256
+  num_classes: 45
+  lstm_units: 96
+
+train:
+  epochs: 40
+  lr: 1.0e-3
+  warmup_steps: 500
+  seed: 0
+  output_dir: artifacts/bottom_region_v1

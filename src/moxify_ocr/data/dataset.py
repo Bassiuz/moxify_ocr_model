@@ -43,6 +43,40 @@ _CHAR_TO_INDEX: dict[str, int] = {ch: i + 1 for i, ch in enumerate(ALPHABET)}
 _INDEX_TO_CHAR: dict[int, str] = {i + 1: ch for i, ch in enumerate(ALPHABET)}
 
 
+# Layouts whose bottom region follows the standard CTC label format. Other
+# layouts (art_series, token, scheme, plane, phenomenon, emblem, ...) either
+# lack a printed collector number region or print it in a format the CRNN
+# cannot reliably read.
+TRAINABLE_LAYOUTS: frozenset[str] = frozenset(
+    {
+        "normal",
+        "split",
+        "transform",
+        "modal_dfc",
+        "flip",
+        "leveler",
+        "class",
+        "saga",
+        "adventure",
+        "prototype",
+    }
+)
+
+
+def is_trainable(entry: ManifestEntry, *, min_release: str = "2008-01-01") -> bool:
+    """Filter cards that have reliable black bottom identifiers.
+
+    - Exclude cards released before ``min_release`` (older cards often have no
+      collector number printed, or printed in colors hard for CRNN to learn).
+    - Exclude non-standard layouts (``art_series``, ``token``, ``scheme``,
+      ``plane``, ``phenomenon``, ...) that don't follow the bottom-region
+      format.
+    """
+    if entry.released_at == "" or entry.released_at < min_release:
+        return False
+    return entry.layout in TRAINABLE_LAYOUTS
+
+
 @dataclass(frozen=True)
 class DatasetConfig:
     """Configuration for :func:`build_dataset`."""
@@ -56,6 +90,7 @@ class DatasetConfig:
     augment: bool = True
     seed: int = 0
     holdout_sets: frozenset[str] = frozenset()
+    min_release: str = "2008-01-01"
 
 
 def encode_label(text: str, alphabet: str = ALPHABET) -> list[int]:
@@ -130,12 +165,14 @@ def _filter_entries(
     split: str,
     seed: int,
     holdout_sets: frozenset[str],
+    min_release: str,
 ) -> list[ManifestEntry]:
-    """Read the manifest and keep only rows that land in ``split``."""
+    """Read the manifest, keep only trainable rows that land in ``split``."""
     return [
         entry
         for entry in read_manifest(manifest_path)
-        if assign_split(entry.set_code, seed=seed, holdout_sets=holdout_sets) == split
+        if is_trainable(entry, min_release=min_release)
+        and assign_split(entry.set_code, seed=seed, holdout_sets=holdout_sets) == split
     ]
 
 
@@ -188,6 +225,7 @@ def build_dataset(config: DatasetConfig) -> tf.data.Dataset:
         config.split,
         config.seed,
         config.holdout_sets,
+        config.min_release,
     )
     target_w, target_h = config.target_size
     gen = _make_generator(

@@ -18,8 +18,52 @@ from moxify_ocr.data.dataset import (
     build_dataset,
     decode_label,
     encode_label,
+    is_trainable,
 )
 from moxify_ocr.data.manifest import ManifestEntry
+
+
+def _make_entry(**overrides: object) -> ManifestEntry:
+    """Build a ManifestEntry with sane defaults; override specific fields in tests."""
+    base: dict[str, object] = {
+        "scryfall_id": "00000000-0000-0000-0000-000000000000",
+        "image_path": "images/fake.jpg",
+        "lang": "en",
+        "set_code": "tst",
+        "collector_number": "001",
+        "rarity": "rare",
+        "type_line": "Creature",
+        "layout": "normal",
+        "finishes": ["nonfoil"],
+        "image_sha256": "",
+        "released_at": "2024-01-01",
+        "printed_size": None,
+    }
+    base.update(overrides)
+    return ManifestEntry(**base)  # type: ignore[arg-type]
+
+
+def test_is_trainable_excludes_pre_2008() -> None:
+    """Cards released before 2008-01-01 are excluded."""
+    entry = _make_entry(released_at="2007-12-31", layout="normal")
+    assert is_trainable(entry) is False
+    # Boundary: exactly the cutoff is allowed.
+    boundary = _make_entry(released_at="2008-01-01", layout="normal")
+    assert is_trainable(boundary) is True
+    # Empty released_at is excluded (we can't verify era → drop).
+    empty = _make_entry(released_at="", layout="normal")
+    assert is_trainable(empty) is False
+
+
+def test_is_trainable_excludes_art_series() -> None:
+    """Non-standard layouts (art_series, token, ...) are excluded."""
+    art = _make_entry(layout="art_series")
+    assert is_trainable(art) is False
+    for layout in ("token", "scheme", "plane", "phenomenon", "emblem"):
+        assert is_trainable(_make_entry(layout=layout)) is False
+    # Standard layouts pass.
+    for layout in ("normal", "split", "transform", "modal_dfc", "saga"):
+        assert is_trainable(_make_entry(layout=layout)) is True
 
 
 def test_alphabet_length() -> None:

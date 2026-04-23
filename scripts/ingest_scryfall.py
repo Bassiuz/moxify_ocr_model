@@ -31,22 +31,22 @@ _DEFAULT_MAX_AGE_DAYS = 7
 #: Print a progress line every N processed cards.
 _PROGRESS_EVERY = 100
 
-#: Only ingest cards released on or after this date (M15 core set, 2014-07-18).
-#: Older cards often lack the modern bottom-identifier format.
-_MIN_RELEASE_DATE = "2014-07-18"
+#: Only ingest cards with the modern 2015 frame — guarantees the modern
+#: bottom-identifier format regardless of release date. Catches retro-frame
+#: reprints (30th Anniversary, The List, etc.) that a date filter would miss.
+_MODERN_FRAME = "2015"
 
 
 def _is_ingestable(card: dict[str, Any]) -> bool:
-    """Return True iff this card has the modern bottom-identifier format.
+    """Return True iff this card has the modern 2015 frame and is paper-printed.
 
     Excludes:
     - Digital-only cards (Arena/MTGO exclusives) — ``digital == True``
-    - Cards released before M15 (2014-07-18)
+    - Non-2015-frame cards (1993/1997/2003/future frames, and retro reprints)
     """
     if card.get("digital") is True:
         return False
-    released_at = card.get("released_at")
-    if not isinstance(released_at, str) or released_at < _MIN_RELEASE_DATE:
+    if card.get("frame") != _MODERN_FRAME:
         return False
     return True
 

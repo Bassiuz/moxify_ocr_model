@@ -43,7 +43,7 @@ pythonpath = ["src"]
 
 [tool.mypy]
 python_version = "3.11"
-mypy_path = ["src"]
+mypy_path = ["src", "."]
 strict = true
 
 [[tool.mypy.overrides]]

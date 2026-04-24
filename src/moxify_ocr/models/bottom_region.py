@@ -25,8 +25,15 @@ from moxify_ocr.models.crnn import build_crnn
 
 
 def build_bottom_region_model() -> Model:
-    """Return the v1 bottom-region CRNN (48x256 RGB -> logits)."""
-    return build_crnn(input_shape=(48, 256, 3), num_classes=45, lstm_units=96)
+    """Return the v1.1 bottom-region CRNN (48x256 RGB -> logits).
+
+    v1.1 bumped ``lstm_units`` from 96 to 256 after v1 plateaued at CER 0.43.
+    The v1 model learned label *structure* (length, separators, trailing
+    "SET . LANG") but not per-glyph character reading — too few recurrent
+    parameters to absorb the full alphabet × positional variation. ~3x more
+    params should put the model into the 0.1-0.2 CER range.
+    """
+    return build_crnn(input_shape=(48, 256, 3), num_classes=45, lstm_units=256)
 
 
 def ctc_loss(y_true: tf.Tensor, y_pred: tf.Tensor) -> tf.Tensor:

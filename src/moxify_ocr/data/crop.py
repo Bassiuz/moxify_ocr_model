@@ -15,8 +15,12 @@ from __future__ import annotations
 from PIL import Image
 
 # Normalized fractions of the card image for the bottom-left region.
-# Same as Moxify's mtg_scan_regions.dart: (x1=0, y1=0.90, x2=0.50, y2=1.00).
-BOTTOM_REGION_FRACTIONS: tuple[float, float, float, float] = (0.0, 0.90, 0.50, 1.00)
+# Narrower than Moxify's scan_regions (x2=0.50) — v2 shrunk to x2=0.40 to
+# exclude the artist-name bleed on modern cards. The collector info sits to
+# the left of the artist credit so nothing meaningful is lost. Model capacity
+# that used to be spent learning to ignore artist names now goes to reading
+# the target text.
+BOTTOM_REGION_FRACTIONS: tuple[float, float, float, float] = (0.0, 0.90, 0.40, 1.00)
 
 # Target model input (H, W) — matches design doc §5.
 TARGET_HEIGHT: int = 48

@@ -1,28 +1,26 @@
-"""Generic CRNN (CNN + BiLSTM + CTC head) for fixed-height text recognition.
+"""CRNN (CNN + stacked BiLSTM + CTC head) for fixed-height text recognition.
 
-Design notes
-------------
-The architecture is deliberately small so the model fits in a TFLite-sized
-budget on a phone:
+v2 design notes
+---------------
+The architecture is a classic text-recognition CRNN built for TFLite on phones:
 
-1. MobileNetV3-Small backbone (``alpha=0.5``, ``include_top=False``) truncated
-   at the **stride-4** block (``re_lu_2``) as a convolutional feature
-   extractor. We stop there rather than run the full backbone because the CRNN
-   needs ``T ≥ 2L - 1`` time-steps where ``L`` is the longest label in
-   characters. Our longest bottom-region labels are ~20 chars, so we need
-   ``T ≥ ~40``. At ``W=256`` with stride 4 that gives ``T=64`` — safely above
-   the CTC alignment minimum. (Running to stride-8 gave ``T=32`` which falls
-   below the minimum and causes CTC mode collapse.)
-2. Collapse the spatial height of the feature map to 1 so the tensor becomes a
-   sequence of per-column feature vectors.
-3. Dropout for regularization before the recurrent stage.
-4. Bidirectional LSTM over that sequence.
-5. Dense projection to ``num_classes`` (linear logits; the CTC loss applies
-   its own log-softmax).
+1. **Purpose-built OCR stem** — a small custom CNN (not a truncated ImageNet
+   backbone). Five Conv-BN-ReLU blocks with asymmetric strides that collapse
+   the height axis aggressively while preserving the width axis (time
+   dimension). Final stem output is ``(B, 1, W/4, 256)`` which we reshape to
+   ``(B, W/4, 256)`` — 64 timesteps for our 256-wide input, 256 channels per
+   timestep. We dropped MobileNetV3-Small after v1.1: cutting a classifier
+   backbone at stride 4 only surfaced 40 channels, which was too thin.
+2. **Stacked 2× BiLSTM** for two-level sequence modeling — the first layer
+   learns local character patterns, the second layer learns cross-character
+   context (e.g. "3-digit number then a single letter = collector_number
+   rarity sequence"). v1.1 had only one BiLSTM and saturated on simpler
+   structural patterns (language codes, separators).
+3. **Dropout on inputs + between recurrent layers** for regularization.
+4. **Linear Dense head** — CTC loss applies its own log-softmax.
 
-Inputs are ``uint8`` RGB images ``[B, H, W, 3]``; normalization to the
-[-1, 1] range expected by MobileNetV3 happens inside the model via a proper
-Keras ``Rescaling`` layer so the saved model can be reloaded without
+Inputs are ``uint8`` RGB images ``[B, H, W, 3]``; the model casts + normalizes
+to [-1, 1] inside via a ``Rescaling`` layer so the saved model reloads without
 ``safe_mode=False``.
 """
 
@@ -31,28 +29,18 @@ from __future__ import annotations
 import keras
 import tensorflow as tf
 from tensorflow.keras import Model, layers
-from tensorflow.keras.applications import MobileNetV3Small
-
-# Cut MobileNetV3-Small here. Stride is 4× the input (H/4, W/4) so a 256-wide
-# input yields T=64 timesteps — enough room for CTC alignment of ~20-char labels.
-# ``expanded_conv_1_expand`` is a stable layer name in MobileNetV3Small that
-# sits right before the block-1 stride-2 depthwise conv, so its output is at
-# stride 4 with a reasonable channel count (40 at alpha=0.5). We avoid
-# ``re_lu_N`` names because Keras renames them when the backbone is
-# instantiated multiple times in the same process (e.g. across tests).
-_STEM_CUT_LAYER = "expanded_conv_1_expand"
 
 
 @keras.saving.register_keras_serializable(package="moxify_ocr")
-class CollapseHeight(layers.Layer):  # type: ignore[misc]
-    """Mean-pool along the height axis: ``[B, H, W, C]`` → ``[B, W, C]``.
+class SqueezeHeight(layers.Layer):  # type: ignore[misc]
+    """Drop the height axis after it's been collapsed to 1: ``(B,1,W,C) → (B,W,C)``.
 
-    Implemented as a proper ``Layer`` subclass (not ``Lambda``) so the model
-    can be saved to ``.keras`` and reloaded without ``safe_mode=False``.
+    Implemented as a registered ``Layer`` subclass (not ``Lambda``) so the model
+    serializes and reloads without ``safe_mode=False``.
     """
 
     def call(self, inputs: tf.Tensor) -> tf.Tensor:
-        return tf.reduce_mean(inputs, axis=1)
+        return tf.squeeze(inputs, axis=1)
 
     def compute_output_shape(
         self, input_shape: tuple[int | None, ...]
@@ -60,59 +48,79 @@ class CollapseHeight(layers.Layer):  # type: ignore[misc]
         return (input_shape[0], input_shape[2], input_shape[3])
 
 
+def _conv_block(
+    x: tf.Tensor,
+    *,
+    filters: int,
+    strides: tuple[int, int],
+    name: str,
+) -> tf.Tensor:
+    """Conv 3x3 → BatchNorm → ReLU. Padding is always 'same'."""
+    x = layers.Conv2D(
+        filters=filters,
+        kernel_size=3,
+        strides=strides,
+        padding="same",
+        use_bias=False,  # redundant with BatchNorm
+        name=f"{name}_conv",
+    )(x)
+    x = layers.BatchNormalization(name=f"{name}_bn")(x)
+    x = layers.ReLU(name=f"{name}_relu")(x)
+    return x
+
+
 def build_crnn(
     *,
     input_shape: tuple[int, int, int] = (48, 256, 3),
     num_classes: int = 45,
-    lstm_units: int = 96,
+    lstm_units: int = 256,
     dropout: float = 0.2,
 ) -> Model:
-    """Build a CRNN: MobileNetV3-Small(stride-4) → collapse height → BiLSTM → Dense.
+    """Build the v2 CRNN: custom OCR stem → stacked 2× BiLSTM → Dense.
 
     Args:
-        input_shape: ``(H, W, C)`` for the image input. The model accepts
+        input_shape: ``(H, W, C)`` for the image input. The model accepts raw
             ``uint8`` tensors of this shape; preprocessing is internal.
         num_classes: Output classes (alphabet size + 1 for the CTC blank).
-        lstm_units: Units per direction in the BiLSTM. Total recurrent width
-            is ``2 * lstm_units``.
-        dropout: Dropout rate applied between the stem and the BiLSTM.
+        lstm_units: Units per direction in each BiLSTM. Total recurrent width
+            per layer is ``2 * lstm_units``.
+        dropout: Dropout rate applied before and between the recurrent layers
+            and on their hidden-to-hidden connections.
 
     Returns:
         A :class:`tf.keras.Model` whose output is ``float32[B, T, num_classes]``
-        logits with ``T = W / 4``.
+        logits, with ``T = W / 4``. For the default ``input_shape=(48, 256, 3)``
+        that's ``T = 64`` timesteps — well above the CTC alignment minimum of
+        ``2 * longest_label - 1 ≈ 40``.
     """
-    height, width, channels = input_shape
-
-    # Raw uint8 input so the training pipeline can feed straight from tf.data
-    # without an explicit cast.
     image_input = layers.Input(shape=input_shape, dtype=tf.uint8, name="image")
-    # Rescaling casts to float and scales to [-1, 1] in one proper Keras layer
-    # (no Lambda → saves/loads cleanly without safe_mode=False).
+
+    # uint8 → float32 in [-1, 1] via a proper Keras layer (no Lambda).
     x = layers.Rescaling(scale=1.0 / 127.5, offset=-1.0, name="normalize")(image_input)
 
-    full_backbone = MobileNetV3Small(
-        input_shape=(height, width, channels),
-        alpha=0.5,
-        include_top=False,
-        weights=None,
-        include_preprocessing=False,
-    )
-    trunk_out = full_backbone.get_layer(_STEM_CUT_LAYER).output
-    backbone = Model(
-        inputs=full_backbone.inputs,
-        outputs=trunk_out,
-        name="mobilenetv3_small_stride4",
-    )
-    features = backbone(x)  # [B, H/4, W/4, C']
+    # Stem. Asymmetric strides collapse H to 1 while keeping W for the time axis.
+    #   (48, 256) → (24, 128) → (12, 64) → (6, 64) → (3, 64) → (1, 64)
+    x = _conv_block(x, filters=32, strides=(2, 2), name="stem1")
+    x = _conv_block(x, filters=64, strides=(2, 2), name="stem2")
+    x = _conv_block(x, filters=128, strides=(2, 1), name="stem3")
+    x = _conv_block(x, filters=192, strides=(2, 1), name="stem4")
+    x = _conv_block(x, filters=256, strides=(3, 1), name="stem5")
 
-    pooled = CollapseHeight(name="collapse_height")(features)  # [B, W/4, C']
-    pooled = layers.Dropout(dropout, name="stem_dropout")(pooled)
+    # (B, 1, W/4, 256) → (B, W/4, 256)
+    x = SqueezeHeight(name="squeeze_h")(x)
 
-    sequence = layers.Bidirectional(
+    # Recurrent sequence modeling.
+    x = layers.Dropout(dropout, name="pre_rnn_dropout")(x)
+    x = layers.Bidirectional(
         layers.LSTM(lstm_units, return_sequences=True, dropout=dropout),
-        name="bilstm",
-    )(pooled)
+        name="bilstm_1",
+    )(x)
+    x = layers.Dropout(dropout, name="inter_rnn_dropout")(x)
+    x = layers.Bidirectional(
+        layers.LSTM(lstm_units, return_sequences=True, dropout=dropout),
+        name="bilstm_2",
+    )(x)
 
-    logits = layers.Dense(num_classes, name="logits")(sequence)
+    logits = layers.Dense(num_classes, name="logits")(x)
 
-    return Model(inputs=image_input, outputs=logits, name="crnn")
+    return Model(inputs=image_input, outputs=logits, name="crnn_v2")

@@ -42,13 +42,14 @@ def test_non_rgb_input_raises() -> None:
 
 
 def test_crop_region_pixel_bounds() -> None:
-    """The bottom-left quarter of the bottom 10% must be sampled, not the rest."""
+    """The bottom-left region must be sampled, not the rest."""
     w, h = 672, 936
     image = _solid((w, h), (0, 255, 0))  # green background
-    # Paint the bottom-left region (x in [0, 0.5*w], y in [0.9*h, h]) pure red.
+    # Paint the bottom-left region (x in [0, 0.4*w], y in [0.9*h, h]) pure red.
+    # 0.40 matches BOTTOM_REGION_FRACTIONS (v2 narrowed from 0.50).
     x1 = 0
     y1 = round(0.90 * h)
-    x2 = round(0.50 * w)
+    x2 = round(0.40 * w)
     y2 = h
     red_patch = _solid((x2 - x1, y2 - y1), (255, 0, 0))
     image.paste(red_patch, (x1, y1))
@@ -170,8 +171,11 @@ def test_idempotent_on_already_target_sized_input() -> None:
 
 
 def test_constants_match_design() -> None:
-    """Sanity-check that the module-level constants match the design doc values."""
-    assert BOTTOM_REGION_FRACTIONS == (0.0, 0.90, 0.50, 1.00)
+    """Sanity-check the module-level constants.
+
+    v2 narrowed the crop from x2=0.50 → x2=0.40 to exclude artist-name bleed.
+    """
+    assert BOTTOM_REGION_FRACTIONS == (0.0, 0.90, 0.40, 1.00)
     assert TARGET_HEIGHT == 48
     assert TARGET_WIDTH == 256
     assert LETTERBOX_FILL_RGB == (114, 114, 114)

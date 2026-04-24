@@ -43,6 +43,9 @@ def _normal_card(card_id: str, *, set_code: str = "clu", collector_number: str =
         "finishes": ["nonfoil", "foil"],
         "image_uris": {"large": f"https://scry/{card_id}-l.jpg"},
         "released_at": "2024-02-09",
+        "frame": "2015",  # modern frame — required by the ingest filter
+        "digital": False,
+        "promo_types": [],
     }
 
 
@@ -57,6 +60,9 @@ def _art_series_card(card_id: str) -> dict[str, Any]:
         "type_line": "Art Series",
         "finishes": ["nonfoil"],
         "image_uris": {"large": f"https://scry/{card_id}-l.jpg"},
+        "frame": "2015",
+        "digital": False,
+        "promo_types": [],
     }
 
 

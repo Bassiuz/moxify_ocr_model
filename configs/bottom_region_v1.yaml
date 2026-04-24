@@ -12,8 +12,8 @@ model:
   lstm_units: 96
 
 train:
-  epochs: 40
-  lr: 1.0e-3
-  warmup_steps: 500
+  epochs: 30
+  lr: 5.0e-4            # lowered from 1e-3 — safer for CTC convergence
+  warmup_steps: 1000    # extended warmup — CTC loss lands in a cleaner basin
   seed: 0
   output_dir: artifacts/bottom_region_v1

@@ -20,14 +20,18 @@ def test_output_shape() -> None:
 
 
 def test_time_dim_proportional_to_width() -> None:
-    """Output time dimension T is approximately W / 8 for MobileNetV3-Small."""
+    """Output time dimension T is approximately W / 4 — we cut MobileNetV3 at stride 4.
+
+    CTC needs T ≥ 2L - 1 where L is the longest label (~20 chars for our
+    labels), so we need T ≥ ~40. Cutting at stride 4 gives T=64 for W=256,
+    safely above the minimum. Earlier stride-8 truncation gave T=32 and caused
+    CTC mode collapse.
+    """
     model = build_crnn(input_shape=(48, 256, 3), num_classes=45, lstm_units=96)
     dummy = np.zeros((1, 48, 256, 3), dtype=np.uint8)
     output = model(dummy, training=False)
     time_steps = int(output.shape[1])
-    # Three halving stages: 256 -> 128 -> 64 -> 32. Allow a little slack for
-    # backbone-version drift.
-    assert 24 <= time_steps <= 40
+    assert 56 <= time_steps <= 72, f"expected T≈W/4=64, got {time_steps}"
 
 
 def test_param_count_reasonable() -> None:

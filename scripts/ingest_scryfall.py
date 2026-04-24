@@ -49,9 +49,7 @@ def _is_ingestable(card: dict[str, Any]) -> bool:
     if card.get("frame") != _MODERN_FRAME:
         return False
     promo_types = card.get("promo_types")
-    if isinstance(promo_types, list) and "playtest" in promo_types:
-        return False
-    return True
+    return not (isinstance(promo_types, list) and "playtest" in promo_types)
 
 
 def main(argv: list[str] | None = None) -> int:

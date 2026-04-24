@@ -67,18 +67,46 @@ def test_make_label_basic_land_prints_L() -> None:
     assert make_label(card, is_foil=False) == "270/286 L\nCLU • EN"
 
 
-def test_make_label_the_list_planeswalker_icon_no_rarity_letter() -> None:
-    # PLST cards prepend the planeswalker icon and SKIP the rarity letter
+def test_make_label_the_list_salvages_original_set_and_number() -> None:
+    # PLST cards store collector_number like "KTK-86" — the card actually
+    # shows KTK/86 with a planeswalker icon, NOT "PLST" or "KTK-86".
     card = _card(
-        collector_number="0041",
+        collector_number="KTK-86",
+        printed_size=None,
+        rarity="common",
+        set_code="plst",
+        lang="en",
+        type_line="Sorcery",
+        released_at="2019-11-07",
+    )
+    assert make_label(card, is_foil=False) == f"{PLANESWALKER_ICON} 86 C\nKTK • EN"
+
+
+def test_make_label_the_list_foil_with_rarity() -> None:
+    card = _card(
+        collector_number="M20-195",
+        printed_size=None,
+        rarity="mythic",
+        set_code="plst",
+        lang="en",
+        type_line="Creature — Dragon",
+        released_at="2022-03-18",
+    )
+    assert make_label(card, is_foil=True) == f"{PLANESWALKER_ICON} 195 M\nM20 ★ EN"
+
+
+def test_make_label_the_list_unrecognized_number_format_falls_through() -> None:
+    # If collector_number doesn't match <SET>-<NUM>, keep raw fields + PW icon.
+    card = _card(
+        collector_number="42",  # no set prefix
         printed_size=None,
         rarity="rare",
         set_code="plst",
         lang="en",
-        type_line="Creature — Elf",
+        type_line="Creature",
         released_at="2022-03-18",
     )
-    assert make_label(card, is_foil=True) == f"{PLANESWALKER_ICON} 0041\nPLST ★ EN"
+    assert make_label(card, is_foil=False) == f"{PLANESWALKER_ICON} 42 R\nPLST • EN"
 
 
 def test_make_label_pre_2008_no_slash_total() -> None:
@@ -175,10 +203,10 @@ def test_make_label_modern_card_without_printed_size_drops_slash_total() -> None
 
 
 def test_make_label_plst_drops_printed_size_even_when_present() -> None:
-    # If for some reason PLST has a printed_size in metadata, rule is still "no /total"
-    # because PLST drops print their collector number in a distinct format.
+    # PLST collector numbers don't encode /total even when a size is around.
+    # Here the collector_number is the salvageable "KTK-86" format.
     card = _card(
-        collector_number="0041",
+        collector_number="KTK-86",
         printed_size=500,
         rarity="rare",
         set_code="plst",
@@ -186,8 +214,8 @@ def test_make_label_plst_drops_printed_size_even_when_present() -> None:
         type_line="Creature — Elf",
         released_at="2022-03-18",
     )
-    # Regardless of printed_size, PLST format is: PW icon + num + lang line
-    assert make_label(card, is_foil=False) == f"{PLANESWALKER_ICON} 0041\nPLST • EN"
+    # Salvaged: KTK set, 86 collector, rarity R, no /total.
+    assert make_label(card, is_foil=False) == f"{PLANESWALKER_ICON} 86 R\nKTK • EN"
 
 
 def test_make_label_uppercases_set_code() -> None:

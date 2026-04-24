@@ -139,7 +139,10 @@ def main(argv: list[str] | None = None) -> int:
         decay_steps=total_steps,
     )
 
-    optimizer = tf.keras.optimizers.AdamW(learning_rate=lr_schedule)
+    optimizer = tf.keras.optimizers.AdamW(
+        learning_rate=lr_schedule,
+        clipnorm=1.0,  # gradient clipping — CTC gradients can spike early
+    )
     model.compile(optimizer=optimizer, loss=ctc_loss)
 
     output_dir = Path(cfg["train"]["output_dir"])

@@ -47,5 +47,5 @@ mypy_path = ["src", "."]
 strict = true
 
 [[tool.mypy.overrides]]
-module = ["tensorflow.*", "cv2.*", "albumentations.*", "editdistance.*", "tqdm.*"]
+module = ["tensorflow.*", "keras.*", "cv2.*", "albumentations.*", "editdistance.*", "tqdm.*"]
 ignore_missing_imports = true

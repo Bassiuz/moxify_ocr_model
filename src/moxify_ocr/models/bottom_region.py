@@ -25,13 +25,14 @@ from moxify_ocr.models.crnn import build_crnn
 
 
 def build_bottom_region_model() -> Model:
-    """Return the v1.1 bottom-region CRNN (48x256 RGB -> logits).
+    """Return the v2 bottom-region CRNN (48x256 RGB -> logits).
 
-    v1.1 bumped ``lstm_units`` from 96 to 256 after v1 plateaued at CER 0.43.
-    The v1 model learned label *structure* (length, separators, trailing
-    "SET . LANG") but not per-glyph character reading — too few recurrent
-    parameters to absorb the full alphabet × positional variation. ~3x more
-    params should put the model into the 0.1-0.2 CER range.
+    v2 replaces the MobileNetV3-Small stem with a purpose-built OCR CNN and
+    stacks two BiLSTM layers. v1.1 plateaued at val_cer ~0.47 because
+    MobileNetV3 surfaces thin features when truncated for OCR (40 channels)
+    and one BiLSTM couldn't model cross-character context. v2 bumps params
+    ~5× (to ~3M), which should put the model into the 0.10-0.20 CER range.
+    See ``docs/plans/2026-04-24-v2-plan.md``.
     """
     return build_crnn(input_shape=(48, 256, 3), num_classes=45, lstm_units=256)
 

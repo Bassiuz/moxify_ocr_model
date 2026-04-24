@@ -20,12 +20,12 @@ def test_output_shape() -> None:
 
 
 def test_time_dim_proportional_to_width() -> None:
-    """Output time dimension T is approximately W / 4 — we cut MobileNetV3 at stride 4.
+    """Output time dimension T is approximately W / 4.
 
     CTC needs T ≥ 2L - 1 where L is the longest label (~20 chars for our
-    labels), so we need T ≥ ~40. Cutting at stride 4 gives T=64 for W=256,
-    safely above the minimum. Earlier stride-8 truncation gave T=32 and caused
-    CTC mode collapse.
+    labels), so we need T ≥ ~40. v2's custom stem has exactly two width-halving
+    stages ((2,2) then (2,2) then three (n,1) height-only collapses) so T = W/4.
+    For the default W=256 that gives T=64, safely above the alignment minimum.
     """
     model = build_crnn(input_shape=(48, 256, 3), num_classes=45, lstm_units=96)
     dummy = np.zeros((1, 48, 256, 3), dtype=np.uint8)
@@ -35,10 +35,14 @@ def test_time_dim_proportional_to_width() -> None:
 
 
 def test_param_count_reasonable() -> None:
-    """Total trainable params sit in the [100k, 2M] range — small CRNN."""
+    """Total trainable params sit in the [100k, 10M] range — small but capable CRNN.
+
+    v2 at defaults (lstm_units=256, 2 BiLSTM layers) is ~3.4M. Earlier versions
+    with smaller LSTM (96) are still inside the range.
+    """
     model = build_crnn(input_shape=(48, 256, 3), num_classes=45, lstm_units=96)
     params = int(model.count_params())
-    assert 100_000 <= params <= 2_000_000, f"got {params} params"
+    assert 100_000 <= params <= 10_000_000, f"got {params} params"
 
 
 def test_accepts_uint8_input() -> None:

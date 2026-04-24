@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 from PIL import Image
@@ -21,7 +22,7 @@ def main() -> None:
     model.load_weights("artifacts/bottom_region_v1/best.keras")
 
     # Pick one non-PLST card per language (first match wins).
-    picks: dict[str, dict] = {}
+    picks: dict[str, dict[str, Any]] = {}
     manifest = Path("data/scryfall/manifest.jsonl")
     with manifest.open() as f:
         for line in f:

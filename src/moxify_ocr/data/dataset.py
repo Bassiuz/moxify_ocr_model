@@ -91,6 +91,10 @@ class DatasetConfig:
     seed: int = 0
     holdout_sets: frozenset[str] = frozenset()
     min_release: str = "2008-01-01"
+    # Fraction of train samples drawn from the synthetic renderer instead of
+    # real manifest rows. 0.0 = real only, 0.5 = 50/50, 1.0 = all synthetic.
+    # Synthetic injection only applies to the train split.
+    synthetic_ratio: float = 0.0
 
 
 def encode_label(text: str, alphabet: str = ALPHABET) -> list[int]:
@@ -182,24 +186,53 @@ def _make_generator(
     target_size: tuple[int, int],
     augment: bool,
     seed: int,
+    synthetic_ratio: float = 0.0,
 ) -> Callable[[], Iterator[tuple[np.ndarray, np.ndarray, np.int32]]]:
     """Build a Python generator that yields (image, label_ids, label_length).
 
-    The generator owns a single augmentation pipeline and re-seeds it per row
-    so each (entry, epoch) combination is reproducible.
+    When ``synthetic_ratio > 0``, each yielded sample has that probability of
+    being drawn from the synthetic renderer instead of a real manifest row —
+    compensates for Scryfall's EN-dominated / common-dominated skew.
     """
+    import random as _random
+
+    from moxify_ocr.data.synthetic import generate_synthetic_crop
+
     pipeline = build_augmentation_pipeline(seed=seed) if augment else None
 
     def gen() -> Iterator[tuple[np.ndarray, np.ndarray, np.int32]]:
+        rng = _random.Random(seed)
+        synth_counter = 0
         for idx, entry in enumerate(entries):
+            # Chance-based synthetic injection (train only — val/test pass
+            # synthetic_ratio=0.0).
+            if synthetic_ratio > 0 and rng.random() < synthetic_ratio:
+                synth_seed = seed * 1_000_003 + 10_000_000 + synth_counter
+                synth_counter += 1
+                synth_img, synth_label = generate_synthetic_crop(seed=synth_seed)
+                try:
+                    synth_ids = np.asarray(encode_label(synth_label), dtype=np.int32)
+                except (ValueError, KeyError):
+                    continue
+                # Letterbox-only (skip crop step since synth is already the crop).
+                synth_img_pil = Image.fromarray(synth_img)
+                synth_letterboxed = crop_bottom_region(
+                    synth_img_pil, target_size=target_size, fractions=(0.0, 0.0, 1.0, 1.0)
+                )
+                image = np.asarray(synth_letterboxed, dtype=np.uint8)
+                if pipeline is not None:
+                    image = apply_augmentation(
+                        image, pipeline, seed=seed * 1_000_003 + idx + 500_000
+                    )
+                yield image, synth_ids, np.int32(len(synth_ids))
+                continue
+
+            # Real row.
             card = _entry_to_card(entry)
             try:
                 label = make_label(card, is_foil=False)
                 label_ids = np.asarray(encode_label(label), dtype=np.int32)
             except (ValueError, KeyError):
-                # Skip rows we can't encode: unsupported languages (e.g. 'qya'
-                # Quenya), promo collector-number suffixes like '268p', or
-                # other characters outside the uppercase CTC alphabet.
                 continue
             image_path = images_root / entry.image_path
             try:
@@ -237,12 +270,16 @@ def build_dataset(config: DatasetConfig) -> tf.data.Dataset:
         config.min_release,
     )
     target_w, target_h = config.target_size
+    # Only mix synthetic samples into the train split — val/test must stay
+    # real so eval metrics reflect real-world OCR quality, not synth quality.
+    synth_ratio = config.synthetic_ratio if config.split == "train" else 0.0
     gen = _make_generator(
         entries,
         config.images_root,
         config.target_size,
         config.augment,
         config.seed,
+        synthetic_ratio=synth_ratio,
     )
 
     output_signature = (

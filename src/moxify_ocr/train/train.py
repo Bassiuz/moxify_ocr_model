@@ -116,6 +116,7 @@ def _build_datasets(
         augment=True,
         seed=seed,
         min_release=str(data_cfg["min_release"]),
+        synthetic_ratio=float(data_cfg.get("synthetic_ratio", 0.0)),
     )
     val_cfg = DatasetConfig(
         manifest_path=Path(data_cfg["manifest"]),

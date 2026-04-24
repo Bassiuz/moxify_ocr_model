@@ -20,7 +20,9 @@ from typing import Any
 import tensorflow as tf
 import yaml
 
-from moxify_ocr.data.dataset import DatasetConfig, build_dataset
+from moxify_ocr.data.dataset import DatasetConfig, build_dataset, is_trainable
+from moxify_ocr.data.manifest import read_manifest
+from moxify_ocr.data.splits import assign_split
 from moxify_ocr.models.bottom_region import build_bottom_region_model, ctc_loss
 from moxify_ocr.train.callbacks import CERCallback
 
@@ -74,6 +76,26 @@ def _build_lr_schedule(
             return {"lr": lr, "warmup_steps": warmup_steps, "decay_steps": decay_steps}
 
     return _WarmupCosine()
+
+
+def _count_steps(cfg: dict[str, Any], *, split: str) -> int:
+    """Approximate steps-per-epoch from the filtered manifest size.
+
+    Counts rows that pass the ``is_trainable`` + split-assignment filters
+    without actually loading images — orders of magnitude faster than
+    materializing the tf.data pipeline once.
+    """
+    data_cfg = cfg["data"]
+    seed = int(cfg["train"]["seed"])
+    min_release = str(data_cfg["min_release"])
+    batch_size = int(data_cfg["batch_size"])
+    count = sum(
+        1
+        for entry in read_manifest(Path(data_cfg["manifest"]))
+        if is_trainable(entry, min_release=min_release)
+        and assign_split(entry.set_code, seed=seed) == split
+    )
+    return max(count // batch_size, 1)
 
 
 def _build_datasets(
@@ -130,8 +152,12 @@ def main(argv: list[str] | None = None) -> int:
     model = build_bottom_region_model()
 
     epochs = int(cfg["train"]["epochs"])
-    # Approximate one-epoch step count once by scanning the train dataset.
-    steps_per_epoch = sum(1 for _ in train_ds)
+    # Count trainable train-split rows directly from the manifest so we don't
+    # have to materialize the whole image-loading pipeline just to count
+    # steps. This count slightly overestimates the real step count because
+    # the generator skips rows with unencodable labels or missing images, but
+    # it's close enough for LR scheduling.
+    steps_per_epoch = _count_steps(cfg, split="train")
     total_steps = max(epochs * steps_per_epoch, 1)
     lr_schedule = _build_lr_schedule(
         lr=float(cfg["train"]["lr"]),
@@ -168,6 +194,7 @@ def main(argv: list[str] | None = None) -> int:
     model.fit(
         train_ds,
         epochs=epochs,
+        steps_per_epoch=steps_per_epoch,
         validation_data=val_ds,
         callbacks=callbacks,
     )

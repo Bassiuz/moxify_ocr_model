@@ -253,6 +253,13 @@ def build_dataset(config: DatasetConfig) -> tf.data.Dataset:
 
     dataset = tf.data.Dataset.from_generator(gen, output_signature=output_signature)
 
+    if config.split == "train":
+        # Train generator must yield indefinitely — Keras's model.fit with
+        # steps_per_epoch=N expects N*epochs total batches across the whole
+        # fit() call. Without .repeat() the generator exhausts after one pass
+        # and epochs 2+ train on no data.
+        dataset = dataset.repeat()
+
     if config.split == "train" and config.shuffle_buffer > 0:
         dataset = dataset.shuffle(
             buffer_size=config.shuffle_buffer,

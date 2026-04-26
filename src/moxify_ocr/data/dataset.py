@@ -213,10 +213,14 @@ def _make_generator(
     When ``line_compositor_ratio > 0``, samples are drawn (with that
     probability per row) from a real-half stitcher built off the manifest.
 
-    Per-sample branch ordering: ``line_compositor → cardconjurer → synthetic →
-    real``. The earlier branches consume the rng draw and ``continue`` past
-    the later ones, so when multiple ratios are nonzero the listed order is
-    the precedence.
+    Routing uses a SINGLE per-row rng draw partitioned by cumulative
+    thresholds: ``[0, lc_ratio)`` → line_compositor, ``[lc_ratio, lc_ratio +
+    cc_ratio)`` → cardconjurer, ``[lc_ratio + cc_ratio, lc_ratio + cc_ratio +
+    synthetic_ratio)`` → synthetic, remainder → real.
+
+    A single draw (instead of independent per-branch draws) guarantees that
+    when ``lc_ratio + cc_ratio + synthetic_ratio == 1.0`` the real-data leg
+    never fires — which is what v3 (synthetic-only train) needs.
     """
     import random as _random
 
@@ -256,17 +260,27 @@ def _make_generator(
                 "produced an empty library — no trainable rows or images missing?"
             )
 
+    # Cumulative thresholds for the single-draw partition. Order matches the
+    # branch precedence in the loop below.
+    lc_threshold = line_compositor_ratio
+    cc_threshold = lc_threshold + cardconjurer_ratio
+    synth_threshold = cc_threshold + synthetic_ratio
+
     def gen() -> Iterator[tuple[np.ndarray, np.ndarray, np.int32]]:
         rng = _random.Random(seed)
         synth_counter = 0
         cc_counter = 0
         lc_counter = 0
         for idx, entry in enumerate(entries):
-            # Chance-based line_compositor injection (train only — val/test
-            # pass line_compositor_ratio=0.0). Checked FIRST so it takes
-            # precedence on the contested band when multiple ratios are set.
+            # Single rng draw → partition into [lc | cc | synth | real]. With
+            # one draw, when lc + cc + synth == 1.0 the real-data leg cannot
+            # fire (which v3 relies on). With independent draws the real-data
+            # leg would fire with probability prod(1 - r) regardless.
+            roll = rng.random()
+
+            # line_compositor leg (train only — val/test pass ratio=0.0).
             # Image is already (48, 256, 3).
-            if lc_lib is not None and rng.random() < line_compositor_ratio:
+            if lc_lib is not None and roll < lc_threshold:
                 lc_seed = seed * 1_000_007 + 20_000_000 + lc_counter
                 lc_counter += 1
                 lc_img, lc_label = composite_sample(lc_lib, seed=lc_seed)
@@ -277,9 +291,9 @@ def _make_generator(
                 yield lc_img, lc_ids, np.int32(len(lc_ids))
                 continue
 
-            # Chance-based CardConjurer injection (train only — val/test pass
-            # cardconjurer_ratio=0.0). Image is already (48, 256, 3).
-            if cc_pool is not None and rng.random() < cardconjurer_ratio:
+            # CardConjurer leg (train only — val/test pass ratio=0.0).
+            # Image is already (48, 256, 3).
+            if cc_pool is not None and roll < cc_threshold:
                 cc_seed = seed * 1_000_003 + 10_000_000 + cc_counter
                 cc_counter += 1
                 cc_img, cc_label = sample_from_pool(cc_pool, seed=cc_seed)
@@ -290,9 +304,8 @@ def _make_generator(
                 yield cc_img, cc_ids, np.int32(len(cc_ids))
                 continue
 
-            # Chance-based synthetic injection (train only — val/test pass
-            # synthetic_ratio=0.0).
-            if synthetic_ratio > 0 and rng.random() < synthetic_ratio:
+            # synthetic leg (train only — val/test pass ratio=0.0).
+            if synthetic_ratio > 0 and roll < synth_threshold:
                 synth_seed = seed * 1_000_003 + 10_000_000 + synth_counter
                 synth_counter += 1
                 synth_img, synth_label = generate_synthetic_crop(seed=synth_seed)

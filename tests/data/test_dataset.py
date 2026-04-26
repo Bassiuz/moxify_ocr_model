@@ -332,6 +332,128 @@ def test_build_dataset_cardconjurer_ratio_one_yields_only_pool(tmp_path: Path) -
     assert sampled >= 1, "dataset yielded zero batches — train split was empty"
 
 
+def test_v3_config_yields_only_synthetic_train_samples(tmp_path: Path) -> None:
+    """v3 invariant: cc_ratio + lc_ratio == 1.0 → train sees zero real-data samples.
+
+    Loads the actual v3 ratios from ``configs/bottom_region_v3.yaml`` and
+    builds a train dataset. cc-pool images carry pure-red sentinels — the
+    real-data leg's crop_bottom_region path applied to the fake manifest
+    images here cannot produce all-red frames, and neither can lc's stitcher
+    (which composites halves of those same fake-random images). Count cc
+    sentinels vs non-cc samples, then assert cc + non-cc == total — i.e.,
+    every yielded sample is accounted for by a synthetic leg.
+
+    Real-data leakage would surface as samples that are byte-identical to
+    crop_bottom_region(manifest_image) for some manifest row. We detect this
+    by checking that no yielded image matches any real-data crop.
+    """
+    import yaml as _yaml
+
+    from moxify_ocr.data.crop import crop_bottom_region
+
+    repo_root = Path(__file__).resolve().parents[2]
+    v3_yaml = repo_root / "configs" / "bottom_region_v3.yaml"
+    v3_cfg = _yaml.safe_load(v3_yaml.read_text())["data"]
+    v3_cc_ratio = v3_cfg["cardconjurer_ratio"]
+    v3_lc_ratio = v3_cfg["line_compositor_ratio"]
+    # Pre-flight: v3 promises cc+lc == 1.0. If someone bumps these out of sync,
+    # this test (and the v3 training run) need re-thinking — fail loud.
+    assert v3_cc_ratio + v3_lc_ratio == 1.0, (
+        f"v3 config promises cc+lc=1.0; got {v3_cc_ratio} + {v3_lc_ratio}"
+    )
+
+    manifest_root = tmp_path / "manifest_root"
+    manifest_root.mkdir()
+    manifest_path = manifest_root / "manifest.jsonl"
+    entries = [
+        ManifestEntry(
+            scryfall_id=f"fake-{i:03d}",
+            image_path=f"images/fake-{i:03d}.jpg",
+            lang="en",
+            set_code=f"fk{i:02d}",
+            collector_number=f"{i:03d}",
+            rarity="rare",
+            type_line="Creature",
+            layout="normal",
+            finishes=["nonfoil"],
+            image_sha256="",
+            released_at="2024-01-01",
+            printed_size=None,
+        )
+        for i in range(20)
+    ]
+    real_crops: list[bytes] = []
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    with manifest_path.open("w", encoding="utf-8") as handle:
+        for idx, entry in enumerate(entries):
+            img_path = manifest_root / entry.image_path
+            sha = _write_fake_image(img_path, seed=idx)
+            payload = asdict(entry)
+            payload["image_sha256"] = sha
+            handle.write(json.dumps(payload) + "\n")
+            # Capture the deterministic real-data crop bytes — any sample
+            # matching one of these would prove the real-data leg fired.
+            with Image.open(img_path) as raw:
+                cropped = crop_bottom_region(raw.convert("RGB"), target_size=(256, 48))
+            real_crops.append(np.asarray(cropped, dtype=np.uint8).tobytes())
+    real_crop_set = set(real_crops)
+
+    pool_root = tmp_path / "ccpool"
+    pool_root.mkdir()
+    _write_fake_cardconjurer_pool(pool_root, n=4)
+
+    cfg = DatasetConfig(
+        manifest_path=manifest_path,
+        images_root=manifest_root,
+        split="train",
+        batch_size=1,
+        shuffle_buffer=0,
+        augment=False,  # disable so real-data crops stay byte-identical to our captured set
+        seed=0,
+        cardconjurer_pool=pool_root,
+        cardconjurer_ratio=v3_cc_ratio,
+        line_compositor_ratio=v3_lc_ratio,
+    )
+    ds = build_dataset(cfg)
+
+    # Sample 200 train items. .repeat() on the train split makes this safe
+    # even for our 20-row fake manifest.
+    target_n = 200
+    cc_count = 0
+    lc_count = 0
+    real_count = 0
+    seen = 0
+    for batch in ds.take(target_n):
+        for image in batch[0].numpy():
+            assert image.shape == (48, 256, 3)
+            is_cc_sentinel = (
+                image[..., 0].mean() == 255
+                and image[..., 1].mean() == 0
+                and image[..., 2].mean() == 0
+            )
+            if is_cc_sentinel:
+                cc_count += 1
+            elif image.tobytes() in real_crop_set:
+                real_count += 1
+            else:
+                lc_count += 1
+            seen += 1
+            if seen >= target_n:
+                break
+        if seen >= target_n:
+            break
+
+    assert seen == target_n, f"expected {target_n} samples, got {seen}"
+    assert real_count == 0, (
+        f"v3 config promises synthetic-only train samples but {real_count}/"
+        f"{target_n} matched a real-data crop — real-data leg leaked through"
+    )
+    assert cc_count + lc_count == target_n
+    # Sanity: with cc_ratio=0.7, lc_ratio=0.3 we expect both legs to fire.
+    assert cc_count > 0, "cc leg never fired — routing or pool wiring broken"
+    assert lc_count > 0, "lc leg never fired — routing or library wiring broken"
+
+
 def test_dataset_routes_to_line_compositor_when_ratio_is_one(tmp_path: Path) -> None:
     """With line_compositor_ratio=1.0 every sample must come from the stitcher.
 

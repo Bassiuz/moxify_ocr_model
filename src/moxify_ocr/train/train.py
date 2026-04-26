@@ -117,6 +117,18 @@ def _build_datasets(
         seed=seed,
         min_release=str(data_cfg["min_release"]),
         synthetic_ratio=float(data_cfg.get("synthetic_ratio", 0.0)),
+        cardconjurer_pool=(
+            Path(data_cfg["cardconjurer_pool"])
+            if data_cfg.get("cardconjurer_pool")
+            else None
+        ),
+        cardconjurer_ratio=float(data_cfg.get("cardconjurer_ratio", 0.0)),
+        line_compositor_manifest=(
+            Path(data_cfg["line_compositor_manifest"])
+            if data_cfg.get("line_compositor_manifest")
+            else None
+        ),
+        line_compositor_ratio=float(data_cfg.get("line_compositor_ratio", 0.0)),
     )
     val_cfg = DatasetConfig(
         manifest_path=Path(data_cfg["manifest"]),

@@ -1,0 +1,36 @@
+# v3 config — synthetic-only train (YOLO-style), real Scryfall val + test.
+#
+# Why: v1/v2 trained on real Scryfall crops with optional synth top-up. v3
+# inverts that: train sees zero real cards, only synthetic legs (CardConjurer
+# pool + line_compositor stitcher). The real Scryfall manifest is still loaded
+# because the set-aware split routes its rows into val + test (so eval still
+# reflects real-world OCR quality), but the train branch never fires for them.
+#
+# cardconjurer_ratio + line_compositor_ratio = 1.0 → real-data leg never fires
+# during training. This is enforced by tests/data/test_dataset.py.
+data:
+  manifest: data/scryfall/manifest.jsonl  # drives val/test splits + lc real-half pool
+  images_root: data/scryfall
+  batch_size: 192
+  shuffle_buffer: 4096                    # bumped from v1's 1024 — larger synthetic pool deserves a wider window
+  min_release: "2008-01-01"
+
+  # Synthetic legs — together they account for 100% of train samples.
+  cardconjurer_pool: data/synth_cardconjurer/v3_100k
+  cardconjurer_ratio: 0.70                # majority leg — high-fidelity rendered crops
+  line_compositor_ratio: 0.30             # complement — real-half stitcher for distribution coverage
+  # Implicit: real-data leg ratio is 1.0 - 0.70 - 0.30 = 0.0 → never fires on train.
+  # Real Scryfall rows still feed val + test via the set-aware split.
+
+model:
+  input_height: 48
+  input_width: 256
+  num_classes: 45
+  lstm_units: 256                          # carried over from v2 (stacked BiLSTM stem)
+
+train:
+  epochs: 50                               # bumped from v2's 30 — bigger synthetic pool overfits more slowly
+  lr: 5.0e-4
+  warmup_steps: 2000                       # bumped from 1000 — synthetic CTC loss benefits from longer warmup
+  seed: 0
+  output_dir: artifacts/bottom_region_v3

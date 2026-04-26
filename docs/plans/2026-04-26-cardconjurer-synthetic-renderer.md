@@ -68,7 +68,7 @@ if [ ! -d "$SRC_DIR" ]; then
   exit 1
 fi
 docker rm -f cardconjurer 2>/dev/null || true
-docker run -d --rm --name cardconjurer -p 4242:80 \
+docker run -d --rm --name cardconjurer -p 4242:4242 \
   -v "$SRC_DIR:/usr/share/nginx/html:ro" \
   -v "$SRC_DIR/app.conf:/etc/nginx/nginx.conf:ro" \
   nginx:alpine
@@ -613,7 +613,7 @@ Note exact line ranges to modify.
 
 **Step 2: Add config field**
 
-In `BottomRegionDatasetConfig` (around `dataset.py:97`), add alongside `synthetic_ratio`:
+In `DatasetConfig` (around `dataset.py:97`), add alongside `synthetic_ratio`:
 
 ```python
 # Path to a pre-rendered CardConjurer pool. When set + ratio > 0, samples
@@ -787,7 +787,7 @@ git rm src/moxify_ocr/data/synthetic.py tests/data/test_synthetic.py assets/Mont
 
 **Step 3: Drop `synthetic_ratio` from `dataset.py`**
 
-Remove the field from `BottomRegionDatasetConfig` and any remaining `synth_*` variables. Run the test suite:
+Remove the field from `DatasetConfig` and any remaining `synth_*` variables. Run the test suite:
 
 ```bash
 .venv/bin/pytest tests/ -v

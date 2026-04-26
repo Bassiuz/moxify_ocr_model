@@ -95,6 +95,14 @@ class DatasetConfig:
     # real manifest rows. 0.0 = real only, 0.5 = 50/50, 1.0 = all synthetic.
     # Synthetic injection only applies to the train split.
     synthetic_ratio: float = 0.0
+    # Path to a pre-rendered CardConjurer pool. When set + ratio > 0, samples
+    # are drawn from this pool instead of the deprecated synthetic.py renderer.
+    cardconjurer_pool: Path | None = None
+    cardconjurer_ratio: float = 0.0
+    # Path to manifest used by line_compositor for its real-half pool.
+    # Defaults to the same manifest used for the real-data leg.
+    line_compositor_manifest: Path | None = None
+    line_compositor_ratio: float = 0.0
 
 
 def encode_label(text: str, alphabet: str = ALPHABET) -> list[int]:
@@ -187,26 +195,117 @@ def _make_generator(
     augment: bool,
     seed: int,
     synthetic_ratio: float = 0.0,
+    cardconjurer_pool: Path | None = None,
+    cardconjurer_ratio: float = 0.0,
+    line_compositor_manifest: Path | None = None,
+    line_compositor_ratio: float = 0.0,
 ) -> Callable[[], Iterator[tuple[np.ndarray, np.ndarray, np.int32]]]:
     """Build a Python generator that yields (image, label_ids, label_length).
 
     When ``synthetic_ratio > 0``, each yielded sample has that probability of
     being drawn from the synthetic renderer instead of a real manifest row —
     compensates for Scryfall's EN-dominated / common-dominated skew.
+
+    When ``cardconjurer_ratio > 0`` and ``cardconjurer_pool`` is set, samples
+    are drawn (with that probability per row) from a pre-rendered CardConjurer
+    pool.
+
+    When ``line_compositor_ratio > 0``, samples are drawn (with that
+    probability per row) from a real-half stitcher built off the manifest.
+
+    Routing uses a SINGLE per-row rng draw partitioned by cumulative
+    thresholds: ``[0, lc_ratio)`` → line_compositor, ``[lc_ratio, lc_ratio +
+    cc_ratio)`` → cardconjurer, ``[lc_ratio + cc_ratio, lc_ratio + cc_ratio +
+    synthetic_ratio)`` → synthetic, remainder → real.
+
+    A single draw (instead of independent per-branch draws) guarantees that
+    when ``lc_ratio + cc_ratio + synthetic_ratio == 1.0`` the real-data leg
+    never fires — which is what v3 (synthetic-only train) needs.
     """
     import random as _random
 
+    from moxify_ocr.data.cardconjurer_dataset import (
+        CardConjurerPool,
+        sample_from_pool,
+    )
+    from moxify_ocr.data.line_compositor import LineLibrary, composite_sample
     from moxify_ocr.data.synthetic import generate_synthetic_crop
 
     pipeline = build_augmentation_pipeline(seed=seed) if augment else None
 
+    if cardconjurer_ratio > 0 and cardconjurer_pool is None:
+        raise ValueError(
+            "cardconjurer_ratio > 0 requires cardconjurer_pool to be set"
+        )
+    cc_pool: CardConjurerPool | None = None
+    if cardconjurer_ratio > 0:
+        cc_pool = CardConjurerPool.load(cardconjurer_pool)
+        if not cc_pool.entries:
+            raise ValueError(
+                f"cardconjurer_pool={cardconjurer_pool} is empty — "
+                "did you run scripts/render_cardconjurer_pool.py?"
+            )
+
+    lc_lib: LineLibrary | None = None
+    if line_compositor_ratio > 0:
+        if line_compositor_manifest is None:
+            raise ValueError(
+                "line_compositor_ratio > 0 requires either "
+                "line_compositor_manifest or a real-data manifest to be set"
+            )
+        lc_lib = LineLibrary.build(line_compositor_manifest, images_root)
+        if lc_lib.is_empty():
+            raise ValueError(
+                f"line_compositor manifest at {line_compositor_manifest} "
+                "produced an empty library — no trainable rows or images missing?"
+            )
+
+    # Cumulative thresholds for the single-draw partition. Order matches the
+    # branch precedence in the loop below.
+    lc_threshold = line_compositor_ratio
+    cc_threshold = lc_threshold + cardconjurer_ratio
+    synth_threshold = cc_threshold + synthetic_ratio
+
     def gen() -> Iterator[tuple[np.ndarray, np.ndarray, np.int32]]:
         rng = _random.Random(seed)
         synth_counter = 0
+        cc_counter = 0
+        lc_counter = 0
         for idx, entry in enumerate(entries):
-            # Chance-based synthetic injection (train only — val/test pass
-            # synthetic_ratio=0.0).
-            if synthetic_ratio > 0 and rng.random() < synthetic_ratio:
+            # Single rng draw → partition into [lc | cc | synth | real]. With
+            # one draw, when lc + cc + synth == 1.0 the real-data leg cannot
+            # fire (which v3 relies on). With independent draws the real-data
+            # leg would fire with probability prod(1 - r) regardless.
+            roll = rng.random()
+
+            # line_compositor leg (train only — val/test pass ratio=0.0).
+            # Image is already (48, 256, 3).
+            if lc_lib is not None and roll < lc_threshold:
+                lc_seed = seed * 1_000_007 + 20_000_000 + lc_counter
+                lc_counter += 1
+                lc_img, lc_label = composite_sample(lc_lib, seed=lc_seed)
+                try:
+                    lc_ids = np.asarray(encode_label(lc_label), dtype=np.int32)
+                except (ValueError, KeyError):
+                    continue
+                yield lc_img, lc_ids, np.int32(len(lc_ids))
+                continue
+
+            # CardConjurer leg (train only — val/test pass ratio=0.0).
+            # Image is already (48, 256, 3).
+            if cc_pool is not None and roll < cc_threshold:
+                cc_seed = seed * 1_000_003 + 10_000_000 + cc_counter
+                cc_counter += 1
+                cc_img, cc_label = sample_from_pool(cc_pool, seed=cc_seed)
+                try:
+                    cc_ids = np.asarray(encode_label(cc_label), dtype=np.int32)
+                except (ValueError, KeyError):
+                    continue
+                yield cc_img, cc_ids, np.int32(len(cc_ids))
+                continue
+
+            # synthetic leg (train only — val/test pass ratio=0.0).
+            if synthetic_ratio > 0 and roll < synth_threshold:
                 synth_seed = seed * 1_000_003 + 10_000_000 + synth_counter
                 synth_counter += 1
                 synth_img, synth_label = generate_synthetic_crop(seed=synth_seed)
@@ -273,6 +372,9 @@ def build_dataset(config: DatasetConfig) -> tf.data.Dataset:
     # Only mix synthetic samples into the train split — val/test must stay
     # real so eval metrics reflect real-world OCR quality, not synth quality.
     synth_ratio = config.synthetic_ratio if config.split == "train" else 0.0
+    cc_ratio = config.cardconjurer_ratio if config.split == "train" else 0.0
+    lc_ratio = config.line_compositor_ratio if config.split == "train" else 0.0
+    lc_manifest = config.line_compositor_manifest or config.manifest_path
     gen = _make_generator(
         entries,
         config.images_root,
@@ -280,6 +382,10 @@ def build_dataset(config: DatasetConfig) -> tf.data.Dataset:
         config.augment,
         config.seed,
         synthetic_ratio=synth_ratio,
+        cardconjurer_pool=config.cardconjurer_pool,
+        cardconjurer_ratio=cc_ratio,
+        line_compositor_manifest=lc_manifest,
+        line_compositor_ratio=lc_ratio,
     )
 
     output_signature = (

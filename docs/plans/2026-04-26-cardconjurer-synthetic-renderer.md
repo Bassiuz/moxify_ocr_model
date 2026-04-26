@@ -68,7 +68,7 @@ if [ ! -d "$SRC_DIR" ]; then
   exit 1
 fi
 docker rm -f cardconjurer 2>/dev/null || true
-docker run -d --rm --name cardconjurer -p 4242:80 \
+docker run -d --rm --name cardconjurer -p 4242:4242 \
   -v "$SRC_DIR:/usr/share/nginx/html:ro" \
   -v "$SRC_DIR/app.conf:/etc/nginx/nginx.conf:ro" \
   nginx:alpine

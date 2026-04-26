@@ -10,6 +10,7 @@ __pycache__/
 /data/
 /artifacts/
 /.tensorboard/
+/.worktrees/
 
 # ML/TF run outputs
 /logs/

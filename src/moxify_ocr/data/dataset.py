@@ -214,8 +214,12 @@ def _make_generator(
 
     pipeline = build_augmentation_pipeline(seed=seed) if augment else None
 
+    if cardconjurer_ratio > 0 and cardconjurer_pool is None:
+        raise ValueError(
+            "cardconjurer_ratio > 0 requires cardconjurer_pool to be set"
+        )
     cc_pool: CardConjurerPool | None = None
-    if cardconjurer_ratio > 0 and cardconjurer_pool is not None:
+    if cardconjurer_ratio > 0:
         cc_pool = CardConjurerPool.load(cardconjurer_pool)
         if not cc_pool.entries:
             raise ValueError(

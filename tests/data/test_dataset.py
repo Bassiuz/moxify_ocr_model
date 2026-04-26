@@ -239,6 +239,31 @@ def _write_fake_cardconjurer_pool(root: Path, n: int = 5) -> None:
             f.write(_json.dumps(r) + "\n")
 
 
+def test_build_dataset_raises_when_cc_ratio_set_but_no_pool(tmp_path: Path) -> None:
+    """A nonzero cardconjurer_ratio without a pool path is a config bug — fail loud.
+
+    Silent skip would have made training fall through to real-only data with
+    plausible-looking loss curves.
+    """
+    manifest_path = tmp_path / "manifest.jsonl"
+    images_root = tmp_path
+    _write_fake_manifest(manifest_path, images_root)
+
+    config = DatasetConfig(
+        manifest_path=manifest_path,
+        images_root=images_root,
+        split="train",
+        batch_size=2,
+        shuffle_buffer=0,
+        augment=False,
+        seed=0,
+        cardconjurer_ratio=0.5,
+        cardconjurer_pool=None,  # <- the bug we're guarding against
+    )
+    with pytest.raises(ValueError, match="cardconjurer_pool"):
+        build_dataset(config)
+
+
 def test_build_dataset_cardconjurer_ratio_one_yields_only_pool(tmp_path: Path) -> None:
     """With cardconjurer_ratio=1.0 on the train split, every yielded sample
     comes from the cc pool.

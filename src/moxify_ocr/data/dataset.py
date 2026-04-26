@@ -99,6 +99,10 @@ class DatasetConfig:
     # are drawn from this pool instead of the deprecated synthetic.py renderer.
     cardconjurer_pool: Path | None = None
     cardconjurer_ratio: float = 0.0
+    # Path to manifest used by line_compositor for its real-half pool.
+    # Defaults to the same manifest used for the real-data leg.
+    line_compositor_manifest: Path | None = None
+    line_compositor_ratio: float = 0.0
 
 
 def encode_label(text: str, alphabet: str = ALPHABET) -> list[int]:
@@ -193,6 +197,8 @@ def _make_generator(
     synthetic_ratio: float = 0.0,
     cardconjurer_pool: Path | None = None,
     cardconjurer_ratio: float = 0.0,
+    line_compositor_manifest: Path | None = None,
+    line_compositor_ratio: float = 0.0,
 ) -> Callable[[], Iterator[tuple[np.ndarray, np.ndarray, np.int32]]]:
     """Build a Python generator that yields (image, label_ids, label_length).
 
@@ -202,7 +208,15 @@ def _make_generator(
 
     When ``cardconjurer_ratio > 0`` and ``cardconjurer_pool`` is set, samples
     are drawn (with that probability per row) from a pre-rendered CardConjurer
-    pool. If both ratios are nonzero, the cc draw is checked first.
+    pool.
+
+    When ``line_compositor_ratio > 0``, samples are drawn (with that
+    probability per row) from a real-half stitcher built off the manifest.
+
+    Per-sample branch ordering: ``line_compositor → cardconjurer → synthetic →
+    real``. The earlier branches consume the rng draw and ``continue`` past
+    the later ones, so when multiple ratios are nonzero the listed order is
+    the precedence.
     """
     import random as _random
 
@@ -210,6 +224,7 @@ def _make_generator(
         CardConjurerPool,
         sample_from_pool,
     )
+    from moxify_ocr.data.line_compositor import LineLibrary, composite_sample
     from moxify_ocr.data.synthetic import generate_synthetic_crop
 
     pipeline = build_augmentation_pipeline(seed=seed) if augment else None
@@ -227,11 +242,41 @@ def _make_generator(
                 "did you run scripts/render_cardconjurer_pool.py?"
             )
 
+    lc_lib: LineLibrary | None = None
+    if line_compositor_ratio > 0:
+        if line_compositor_manifest is None:
+            raise ValueError(
+                "line_compositor_ratio > 0 requires either "
+                "line_compositor_manifest or a real-data manifest to be set"
+            )
+        lc_lib = LineLibrary.build(line_compositor_manifest, images_root)
+        if lc_lib.is_empty():
+            raise ValueError(
+                f"line_compositor manifest at {line_compositor_manifest} "
+                "produced an empty library — no trainable rows or images missing?"
+            )
+
     def gen() -> Iterator[tuple[np.ndarray, np.ndarray, np.int32]]:
         rng = _random.Random(seed)
         synth_counter = 0
         cc_counter = 0
+        lc_counter = 0
         for idx, entry in enumerate(entries):
+            # Chance-based line_compositor injection (train only — val/test
+            # pass line_compositor_ratio=0.0). Checked FIRST so it takes
+            # precedence on the contested band when multiple ratios are set.
+            # Image is already (48, 256, 3).
+            if lc_lib is not None and rng.random() < line_compositor_ratio:
+                lc_seed = seed * 1_000_007 + 20_000_000 + lc_counter
+                lc_counter += 1
+                lc_img, lc_label = composite_sample(lc_lib, seed=lc_seed)
+                try:
+                    lc_ids = np.asarray(encode_label(lc_label), dtype=np.int32)
+                except (ValueError, KeyError):
+                    continue
+                yield lc_img, lc_ids, np.int32(len(lc_ids))
+                continue
+
             # Chance-based CardConjurer injection (train only — val/test pass
             # cardconjurer_ratio=0.0). Image is already (48, 256, 3).
             if cc_pool is not None and rng.random() < cardconjurer_ratio:
@@ -315,6 +360,8 @@ def build_dataset(config: DatasetConfig) -> tf.data.Dataset:
     # real so eval metrics reflect real-world OCR quality, not synth quality.
     synth_ratio = config.synthetic_ratio if config.split == "train" else 0.0
     cc_ratio = config.cardconjurer_ratio if config.split == "train" else 0.0
+    lc_ratio = config.line_compositor_ratio if config.split == "train" else 0.0
+    lc_manifest = config.line_compositor_manifest or config.manifest_path
     gen = _make_generator(
         entries,
         config.images_root,
@@ -324,6 +371,8 @@ def build_dataset(config: DatasetConfig) -> tf.data.Dataset:
         synthetic_ratio=synth_ratio,
         cardconjurer_pool=config.cardconjurer_pool,
         cardconjurer_ratio=cc_ratio,
+        line_compositor_manifest=lc_manifest,
+        line_compositor_ratio=lc_ratio,
     )
 
     output_signature = (

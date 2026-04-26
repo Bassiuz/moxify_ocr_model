@@ -330,3 +330,80 @@ def test_build_dataset_cardconjurer_ratio_one_yields_only_pool(tmp_path: Path) -
             assert image[..., 2].mean() == 0
             sampled += 1
     assert sampled >= 1, "dataset yielded zero batches — train split was empty"
+
+
+def test_dataset_routes_to_line_compositor_when_ratio_is_one(tmp_path: Path) -> None:
+    """With line_compositor_ratio=1.0 every sample must come from the stitcher.
+
+    Counter-test against the cardconjurer leg: we wire up BOTH a cc pool (with
+    pure-red sentinel images) AND set line_compositor_ratio=1.0. Because the lc
+    branch is checked first and consumes the random draw, no cc-pool sentinel
+    sample should leak through. Real Scryfall halves stitched by line_compositor
+    cannot produce pure-red frames, so any (255, 0, 0) image proves the cc leg
+    fired — which would be a routing bug.
+    """
+    manifest_root = tmp_path / "manifest_root"
+    manifest_root.mkdir()
+    manifest_path = manifest_root / "manifest.jsonl"
+    # Bigger manifest → at least one row reliably hashes into train.
+    entries = [
+        ManifestEntry(
+            scryfall_id=f"fake-{i:03d}",
+            image_path=f"images/fake-{i:03d}.jpg",
+            lang="en",
+            set_code=f"fk{i:02d}",
+            collector_number=f"{i:03d}",
+            rarity="rare",
+            type_line="Creature",
+            layout="normal",
+            finishes=["nonfoil"],
+            image_sha256="",
+            released_at="2024-01-01",
+            printed_size=None,
+        )
+        for i in range(20)
+    ]
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    with manifest_path.open("w", encoding="utf-8") as handle:
+        for idx, entry in enumerate(entries):
+            img_path = manifest_root / entry.image_path
+            sha = _write_fake_image(img_path, seed=idx)
+            payload = asdict(entry)
+            payload["image_sha256"] = sha
+            handle.write(json.dumps(payload) + "\n")
+
+    pool_root = tmp_path / "ccpool"
+    pool_root.mkdir()
+    _write_fake_cardconjurer_pool(pool_root, n=4)
+
+    cfg = DatasetConfig(
+        manifest_path=manifest_path,
+        images_root=manifest_root,
+        split="train",
+        batch_size=1,
+        shuffle_buffer=0,
+        augment=False,
+        seed=0,
+        cardconjurer_pool=pool_root,
+        cardconjurer_ratio=1.0,
+        line_compositor_ratio=1.0,
+    )
+    ds = build_dataset(cfg)
+    sampled = 0
+    for batch in ds.take(5):
+        images = batch[0].numpy()
+        for image in images:
+            assert image.shape == (48, 256, 3)
+            # If lc fires first and consumes the rng draw, no cc red sentinel
+            # should ever appear — any all-red frame proves wrong routing.
+            is_red_sentinel = (
+                image[..., 0].mean() == 255
+                and image[..., 1].mean() == 0
+                and image[..., 2].mean() == 0
+            )
+            assert not is_red_sentinel, (
+                "cardconjurer-pool sentinel image leaked through with "
+                "line_compositor_ratio=1.0 — lc branch did not take precedence"
+            )
+            sampled += 1
+    assert sampled >= 1, "dataset yielded zero batches — train split was empty"

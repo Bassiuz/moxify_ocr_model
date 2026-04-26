@@ -16,9 +16,10 @@ import albumentations as A
 import numpy as np
 
 # Max gaussian noise σ in uint8 intensity units. Albumentations 2.x accepts
-# ``std_range`` as a fraction of 255, so we convert. Was 5/255; bump for the
-# synthetic→real gap.
-_GAUSS_NOISE_MAX_UINT8: float = 12.0
+# ``std_range`` as a fraction of 255, so we convert. The first v3 pass at 12/255
+# combined with low JPEG + heavy blur made 6 of 16 sample variants illegible;
+# back off to a modest bump above the v2 baseline of 5/255.
+_GAUSS_NOISE_MAX_UINT8: float = 7.0
 _GAUSS_NOISE_STD_RANGE: tuple[float, float] = (0.0, _GAUSS_NOISE_MAX_UINT8 / 255.0)
 
 
@@ -26,40 +27,40 @@ def build_augmentation_pipeline(*, seed: int = 0) -> A.Compose:
     """Build an Albumentations pipeline tuned for 48x256 bottom-region crops.
 
     Geometric:
-      - rotate ±5°
-      - perspective warp scale 1-5%
-      - affine scale 0.92-1.08
+      - rotate ±4°
+      - perspective warp scale 1-3.5%
+      - affine scale 0.94-1.06
 
     Photometric:
-      - brightness/contrast ±30%
-      - hue/sat/val drift (p=0.5) — synthetic is pure white, real has color cast
-      - gaussian noise σ ∈ [0, 12] (uint8 intensity units)
-      - JPEG compression quality ∈ [60, 95]
-      - gaussian blur σ ∈ [0, 1.5]
-      - motion blur (p=0.20)
+      - brightness/contrast ±25%
+      - hue/sat/val drift (p=0.4) — synthetic is pure white, real has color cast
+      - gaussian noise σ ∈ [0, 7] (uint8 intensity units)
+      - JPEG compression quality ∈ [70, 95]
+      - gaussian blur σ ∈ [0, 1.1]
+      - motion blur (p=0.15)
 
     Operates on uint8 HWC RGB images. Returns a :class:`A.Compose` whose per-call
     randomness is controlled via :func:`apply_augmentation`.
     """
     pipeline = A.Compose(
         [
-            A.Affine(rotate=(-5, 5), scale=(0.92, 1.08), p=1.0),
-            A.Perspective(scale=(0.01, 0.05), p=1.0),
+            A.Affine(rotate=(-4, 4), scale=(0.94, 1.06), p=1.0),
+            A.Perspective(scale=(0.01, 0.035), p=1.0),
             A.RandomBrightnessContrast(
-                brightness_limit=0.30,
-                contrast_limit=0.30,
+                brightness_limit=0.25,
+                contrast_limit=0.25,
                 p=1.0,
             ),
             A.HueSaturationValue(
-                hue_shift_limit=8,
-                sat_shift_limit=15,
-                val_shift_limit=15,
-                p=0.5,
+                hue_shift_limit=5,
+                sat_shift_limit=10,
+                val_shift_limit=10,
+                p=0.4,
             ),
             A.GaussNoise(std_range=_GAUSS_NOISE_STD_RANGE, p=1.0),
-            A.ImageCompression(quality_range=(60, 95), p=1.0),
-            A.GaussianBlur(sigma_limit=(0.0, 1.5), p=1.0),
-            A.MotionBlur(p=0.20),
+            A.ImageCompression(quality_range=(70, 95), p=1.0),
+            A.GaussianBlur(sigma_limit=(0.0, 1.1), p=1.0),
+            A.MotionBlur(p=0.15),
         ],
         seed=seed,
     )

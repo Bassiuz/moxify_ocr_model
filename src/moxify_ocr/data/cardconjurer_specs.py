@@ -12,6 +12,7 @@ the renderer (see ``scripts/render_cardconjurer_pool.py``).
 
 from __future__ import annotations
 
+import hashlib
 import random
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -85,7 +86,18 @@ def make_spec(seed: int) -> CardSpec:
     )
 
 
+def _derive_seed(base: int, i: int) -> int:
+    """Deterministically combine a base seed and an index into a per-spec seed.
+
+    Uses SHA-256 so the result is stable across processes and Python versions
+    (built-in ``hash()`` is salted). Returns a 32-bit unsigned int — plenty of
+    range for ``random.Random``.
+    """
+    digest = hashlib.sha256(f"{base}:{i}".encode()).digest()
+    return int.from_bytes(digest[:4], "big")
+
+
 def generate_specs(n: int, seed: int = 0) -> Iterator[CardSpec]:
     """Yield ``n`` specs derived deterministically from a base seed."""
     for i in range(n):
-        yield make_spec(seed=seed * 1_000_003 + i)
+        yield make_spec(seed=_derive_seed(seed, i))

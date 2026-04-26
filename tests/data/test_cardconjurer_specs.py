@@ -47,3 +47,18 @@ def test_foil_distribution_is_realistic() -> None:
     foil_count = sum(s.foil for s in specs)
     # Real MTG distribution: foils are minority but not negligible.
     assert 100 < foil_count < 400
+
+
+def test_generate_specs_with_adjacent_base_seeds_does_not_overlap() -> None:
+    """Adjacent base seeds must produce essentially-disjoint streams.
+
+    Regression test for a prior linear seed-mix bug where ``generate_specs(n, seed=0)``
+    and ``generate_specs(n, seed=1)`` overlapped in 99% of specs.
+    """
+    a = list(generate_specs(n=100, seed=0))
+    b = list(generate_specs(n=100, seed=1))
+    overlap = sum(1 for spec_a, spec_b in zip(a, b, strict=True) if spec_a == spec_b)
+    # Random chance of two specs being identical is roughly (1/N_sets) × (1/N_langs)
+    # × (1/N_rarities) × (1/N_collectors) × 1/2 — vanishingly small. Allow up to 5
+    # accidental collisions out of 100 to leave room for distribution-edge cases.
+    assert overlap < 5, f"adjacent base seeds overlap {overlap}/100 — seed mixing is broken"

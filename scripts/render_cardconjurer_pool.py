@@ -55,6 +55,18 @@ _TAB_RESTART_EVERY = 1000
 #: Print a progress line every N specs.
 _PROGRESS_EVERY = 100
 
+#: Backoff schedule (seconds) for retrying a failed tab open. The total
+#: budget (~3.5min) is enough to ride out a docker container restart.
+_TAB_OPEN_BACKOFF_SECONDS = (5, 10, 30, 60, 120)
+
+#: After this many consecutive per-spec failures, force a fresh tab — the
+#: page object is likely dead (browser context closed, JS state corrupt).
+_CONSECUTIVE_FAIL_FORCE_RESTART = 5
+
+#: After this many consecutive per-spec failures (even across forced
+#: restarts), abort the run — something fundamental is broken.
+_CONSECUTIVE_FAIL_HARD_ABORT = 25
+
 #: Browser viewport — same as the spike (large enough that the canvas the
 #: bottom-info layer is rasterized to is high-resolution).
 _VIEWPORT = {"width": 1400, "height": 1100}
@@ -102,9 +114,7 @@ def _check_cardconjurer_reachable(url: str) -> None:
     try:
         with urllib.request.urlopen(url, timeout=5) as resp:
             if resp.status >= 400:
-                raise RuntimeError(
-                    f"CardConjurer returned HTTP {resp.status} at {url}"
-                )
+                raise RuntimeError(f"CardConjurer returned HTTP {resp.status} at {url}")
     except (urllib.error.URLError, OSError, TimeoutError) as e:
         raise SystemExit(
             f"error: CardConjurer not reachable at {url}: {e}\n"
@@ -138,8 +148,7 @@ def _prime_page(page: Page, url: str) -> None:
     )
     page.wait_for_function("typeof drawCard === 'function'", timeout=30000)
     page.wait_for_function(
-        "typeof bottomInfoEdited === 'function' "
-        "&& typeof setBottomInfoStyle === 'function'",
+        "typeof bottomInfoEdited === 'function' && typeof setBottomInfoStyle === 'function'",
         timeout=30000,
     )
     page.evaluate(
@@ -164,6 +173,36 @@ def _open_fresh_page(browser: Browser, url: str) -> Page:
     page = browser.new_page(viewport=_VIEWPORT)
     _prime_page(page, url)
     return page
+
+
+def _open_fresh_page_with_retry(browser: Browser, url: str) -> Page:
+    """Open a fresh tab, retrying on transient failures.
+
+    Retries up to ``len(_TAB_OPEN_BACKOFF_SECONDS) + 1`` times with the
+    backoff schedule defined in ``_TAB_OPEN_BACKOFF_SECONDS``. This lets
+    the run survive a brief docker container blip mid-flight (e.g. a 28h
+    unattended render). If every attempt still fails, re-raises the last
+    exception so the caller can decide whether to abort.
+    """
+    attempts = len(_TAB_OPEN_BACKOFF_SECONDS) + 1
+    last_exc: BaseException | None = None
+    for attempt in range(attempts):
+        try:
+            return _open_fresh_page(browser, url)
+        except Exception as e:  # noqa: BLE001
+            last_exc = e
+            if attempt == attempts - 1:
+                break
+            backoff = _TAB_OPEN_BACKOFF_SECONDS[attempt]
+            print(
+                f"  ! tab open failed (attempt {attempt + 1}/{attempts}): "
+                f"{type(e).__name__}: {e}; retrying in {backoff}s",
+                file=sys.stderr,
+                flush=True,
+            )
+            time.sleep(backoff)
+    assert last_exc is not None
+    raise last_exc
 
 
 def _set_field(page: Page, dom_id: str, value: str) -> None:
@@ -229,9 +268,7 @@ def _capture_bottom_canvas_png(page: Page) -> bytes:
             return {data_url: out.toDataURL('image/png')};
         }"""
     )
-    if not result or not result.get("data_url", "").startswith(
-        "data:image/png;base64,"
-    ):
+    if not result or not result.get("data_url", "").startswith("data:image/png;base64,"):
         raise RuntimeError("could not read window.bottomInfoCanvas")
     return base64.b64decode(result["data_url"].split(",", 1)[1])
 
@@ -279,16 +316,10 @@ def _jsonl_row(spec: CardSpec, image_rel_path: str) -> dict[str, object]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description=(
-            "Render a pool of CardConjurer bottom-strip crops + labels to disk."
-        )
+        description=("Render a pool of CardConjurer bottom-strip crops + labels to disk.")
     )
-    parser.add_argument(
-        "--n", type=int, required=True, help="number of cards to render"
-    )
-    parser.add_argument(
-        "--seed", type=int, default=0, help="base seed for spec generation"
-    )
+    parser.add_argument("--n", type=int, required=True, help="number of cards to render")
+    parser.add_argument("--seed", type=int, default=0, help="base seed for spec generation")
     parser.add_argument(
         "--out-dir",
         type=Path,
@@ -321,10 +352,11 @@ def main(argv: list[str] | None = None) -> int:
     t_start = time.time()
     succeeded = 0
     failed = 0
+    consecutive_failures = 0
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        page = _open_fresh_page(browser, args.cardconjurer_url)
+        page = _open_fresh_page_with_retry(browser, args.cardconjurer_url)
         try:
             with labels_path.open("a", encoding="utf-8") as label_fp:
                 for i, spec in enumerate(generate_specs(args.n, args.seed)):
@@ -334,7 +366,7 @@ def main(argv: list[str] | None = None) -> int:
                         # we don't pay the per-launch overhead.
                         with contextlib.suppress(Exception):
                             page.close()
-                        page = _open_fresh_page(browser, args.cardconjurer_url)
+                        page = _open_fresh_page_with_retry(browser, args.cardconjurer_url)
 
                     image_rel = f"images/{i:08d}.png"
                     image_path = args.out_dir / image_rel
@@ -348,21 +380,45 @@ def main(argv: list[str] | None = None) -> int:
                             flush=True,
                         )
                         failed += 1
+                        consecutive_failures += 1
+
+                        if consecutive_failures >= _CONSECUTIVE_FAIL_HARD_ABORT:
+                            raise SystemExit(
+                                f"error: {consecutive_failures} consecutive "
+                                f"spec failures — aborting run.\n"
+                                f"hint: likely cause is the cardconjurer "
+                                f"container being down, the chromium process "
+                                f"having OOM'd, or the host GPU/driver "
+                                f"having crashed. Check `docker ps` and "
+                                f"system logs."
+                            ) from e
+
+                        if consecutive_failures >= _CONSECUTIVE_FAIL_FORCE_RESTART:
+                            print(
+                                f"  ! {consecutive_failures} consecutive "
+                                f"failures; forcing tab restart",
+                                file=sys.stderr,
+                                flush=True,
+                            )
+                            with contextlib.suppress(Exception):
+                                page.close()
+                            page = _open_fresh_page_with_retry(browser, args.cardconjurer_url)
                         continue
 
                     label_fp.write(
-                        json.dumps(_jsonl_row(spec, image_rel), ensure_ascii=False)
-                        + "\n"
+                        json.dumps(_jsonl_row(spec, image_rel), ensure_ascii=False) + "\n"
                     )
                     label_fp.flush()
                     succeeded += 1
+                    consecutive_failures = 0
 
                     if (i + 1) % _PROGRESS_EVERY == 0:
                         elapsed = time.time() - t_start
                         rate = elapsed / (i + 1)
                         eta = rate * (args.n - (i + 1))
                         print(
-                            f"[{i + 1}/{args.n}] elapsed={elapsed:.1f}s "
+                            f"[{i + 1}/{args.n}] ok={succeeded} fail={failed} "
+                            f"elapsed={elapsed:.1f}s "
                             f"rate={rate:.2f}s/card eta={_format_eta(eta)}",
                             flush=True,
                         )
@@ -373,8 +429,7 @@ def main(argv: list[str] | None = None) -> int:
 
     elapsed = time.time() - t_start
     print(
-        f"done: {succeeded}/{args.n} ok, {failed} failed, "
-        f"elapsed={_format_eta(elapsed)}",
+        f"done: {succeeded}/{args.n} ok, {failed} failed, elapsed={_format_eta(elapsed)}",
         flush=True,
     )
     return 0 if failed == 0 else 1

@@ -217,3 +217,91 @@ def test_build_dataset_object_creation(tmp_path: Path) -> None:
     )
     dataset = build_dataset(config)
     assert dataset is not None
+
+
+def _write_fake_cardconjurer_pool(root: Path, n: int = 5) -> None:
+    """Write a tiny CardConjurer pool. Sentinel pixel: pure red (255, 0, 0).
+
+    Real Scryfall crops + the (114, 114, 114) gray letterbox never produce
+    pure-red pixels, so every cc-pool sample is identifiable.
+    """
+    import json as _json
+
+    (root / "images").mkdir(parents=True, exist_ok=True)
+    rows = []
+    for i in range(n):
+        img_path = f"images/cc-{i:08d}.png"
+        # Pure red — sentinel that the dataset path actually drew from the pool.
+        Image.new("RGB", (256, 48), (255, 0, 0)).save(root / img_path)
+        rows.append({"image_path": img_path, "label": f"00{i}/100 R\nMID • EN"})
+    with (root / "labels.jsonl").open("w") as f:
+        for r in rows:
+            f.write(_json.dumps(r) + "\n")
+
+
+def test_build_dataset_cardconjurer_ratio_one_yields_only_pool(tmp_path: Path) -> None:
+    """With cardconjurer_ratio=1.0 on the train split, every yielded sample
+    comes from the cc pool.
+
+    Uses pure-red sentinel pixels in the fake pool — the production crop +
+    (114, 114, 114) gray letterbox path can never produce those.
+    """
+    manifest_root = tmp_path / "manifest_root"
+    manifest_root.mkdir()
+    manifest_path = manifest_root / "manifest.jsonl"
+    # Bigger manifest → at least one row reliably hashes into train.
+    entries = [
+        ManifestEntry(
+            scryfall_id=f"fake-{i:03d}",
+            image_path=f"images/fake-{i:03d}.jpg",
+            lang="en",
+            set_code=f"fk{i:02d}",
+            collector_number=f"{i:03d}",
+            rarity="rare",
+            type_line="Creature",
+            layout="normal",
+            finishes=["nonfoil"],
+            image_sha256="",
+            released_at="2024-01-01",
+            printed_size=None,
+        )
+        for i in range(20)
+    ]
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    with manifest_path.open("w", encoding="utf-8") as handle:
+        for idx, entry in enumerate(entries):
+            img_path = manifest_root / entry.image_path
+            sha = _write_fake_image(img_path, seed=idx)
+            payload = asdict(entry)
+            payload["image_sha256"] = sha
+            handle.write(json.dumps(payload) + "\n")
+
+    pool_root = tmp_path / "ccpool"
+    pool_root.mkdir()
+    _write_fake_cardconjurer_pool(pool_root, n=4)
+
+    cfg = DatasetConfig(
+        manifest_path=manifest_path,
+        images_root=manifest_root,
+        split="train",
+        batch_size=1,
+        shuffle_buffer=0,
+        augment=False,
+        seed=0,
+        cardconjurer_pool=pool_root,
+        cardconjurer_ratio=1.0,
+    )
+    ds = build_dataset(cfg)
+    sampled = 0
+    for batch in ds.take(5):
+        images = batch[0].numpy()
+        for image in images:
+            assert image.shape == (48, 256, 3)
+            # Entire frame is (255, 0, 0) — mean R == 255, mean G == B == 0.
+            assert image[..., 0].mean() == 255, (
+                f"expected pure-red R channel, got mean={image[..., 0].mean()}"
+            )
+            assert image[..., 1].mean() == 0
+            assert image[..., 2].mean() == 0
+            sampled += 1
+    assert sampled >= 1, "dataset yielded zero batches — train split was empty"

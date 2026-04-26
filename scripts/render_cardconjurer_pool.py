@@ -41,13 +41,6 @@ from moxify_ocr.data.cardconjurer_specs import CardSpec, generate_specs
 #: Output crop size — must match the OCR model's expected input shape.
 _CROP_SIZE = (256, 48)
 
-#: Wide-crop fractions matching the spike (NOT the production crop). These
-#: produced the contact sheet the user reviewed and approved.
-_CROP_TOP_FRAC = 0.928
-_CROP_BOTTOM_FRAC = 0.98
-_CROP_LEFT_FRAC = 0.05
-_CROP_RIGHT_FRAC = 0.95
-
 #: Restart the Chromium tab every N specs to defend against memory leaks
 #: in long-running Playwright contexts.
 _TAB_RESTART_EVERY = 1000
@@ -274,20 +267,16 @@ def _capture_bottom_canvas_png(page: Page) -> bytes:
 
 
 def _crop_and_resize(png_bytes: bytes) -> Image.Image:
-    """Crop a wide bottom strip and resize to ``_CROP_SIZE``.
+    """Crop the bottom-info region using the production fractions and letterbox-resize.
 
-    Crop fractions match the spike: ``(0.05, 0.928, 0.95, 0.98)``. Resize
-    uses LANCZOS for sharp downsampling of the small text glyphs.
+    Delegates to ``crop_bottom_region`` so synthetic samples land in the same
+    shape and aspect as real Scryfall crops the OCR model trains on. Direct
+    resize would distort the text vertically (12:1 source → 5:1 target).
     """
+    from moxify_ocr.data.crop import crop_bottom_region
+
     img = Image.open(io.BytesIO(png_bytes)).convert("RGB")
-    w, h = img.size
-    box = (
-        int(w * _CROP_LEFT_FRAC),
-        int(h * _CROP_TOP_FRAC),
-        int(w * _CROP_RIGHT_FRAC),
-        min(int(h * _CROP_BOTTOM_FRAC), h),
-    )
-    return img.crop(box).resize(_CROP_SIZE, Image.LANCZOS)
+    return crop_bottom_region(img, target_size=_CROP_SIZE)
 
 
 def _format_eta(seconds: float) -> str:

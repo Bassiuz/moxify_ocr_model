@@ -9,7 +9,7 @@
 # cardconjurer_ratio + line_compositor_ratio = 1.0 → real-data leg never fires
 # during training. This is enforced by tests/data/test_dataset.py.
 data:
-  manifest_path: data/scryfall/manifest.jsonl  # drives val/test splits + lc real-half pool
+  manifest: data/scryfall/manifest.jsonl  # drives val/test splits + lc real-half pool
   images_root: data/scryfall
   batch_size: 192
   shuffle_buffer: 4096                    # bumped from v1's 1024 — larger synthetic pool deserves a wider window

@@ -454,6 +454,101 @@ def test_v3_config_yields_only_synthetic_train_samples(tmp_path: Path) -> None:
     assert lc_count > 0, "lc leg never fired — routing or library wiring broken"
 
 
+def test_build_datasets_forwards_v3_yaml_ratios(tmp_path: Path) -> None:
+    """Trainer's ``_build_datasets`` must forward cc + lc fields from yaml.
+
+    Regression test for the v3 wiring bug where ``configs/bottom_region_v3.yaml``
+    used ``manifest_path:`` (mismatching the trainer's read key ``manifest``)
+    and ``_build_datasets`` only forwarded ``synthetic_ratio`` — cc + lc
+    ratios were silently dropped, so v3 training would fall back to v1
+    real-only behavior with no error.
+
+    We materialize a tiny v3-shape yaml on disk, call ``_build_datasets``
+    on it, and inspect the underlying ``DatasetConfig`` produced for the
+    train split to confirm the cc/lc ratios survived the round-trip.
+    """
+    import yaml as _yaml
+
+    from moxify_ocr.train.train import _build_datasets
+
+    manifest_root = tmp_path / "manifest_root"
+    manifest_root.mkdir()
+    manifest_path = manifest_root / "manifest.jsonl"
+    _write_fake_manifest(manifest_path, manifest_root)
+
+    pool_root = tmp_path / "ccpool"
+    pool_root.mkdir()
+    _write_fake_cardconjurer_pool(pool_root, n=4)
+
+    # v3-shape yaml: ``manifest:`` (not ``manifest_path:``), cc + lc ratios.
+    cfg_path = tmp_path / "v3.yaml"
+    cfg_path.write_text(
+        _yaml.safe_dump(
+            {
+                "data": {
+                    "manifest": str(manifest_path),
+                    "images_root": str(manifest_root),
+                    "batch_size": 2,
+                    "shuffle_buffer": 0,
+                    "min_release": "2008-01-01",
+                    "cardconjurer_pool": str(pool_root),
+                    "cardconjurer_ratio": 0.7,
+                    "line_compositor_ratio": 0.3,
+                },
+                "model": {
+                    "input_height": 48,
+                    "input_width": 256,
+                    "num_classes": 45,
+                    "lstm_units": 256,
+                },
+                "train": {
+                    "epochs": 1,
+                    "lr": 5.0e-4,
+                    "warmup_steps": 100,
+                    "seed": 0,
+                    "output_dir": str(tmp_path / "out"),
+                },
+            }
+        )
+    )
+
+    # Capture the train DatasetConfig that _build_datasets constructs by
+    # patching DatasetConfig in the train module to record its kwargs.
+    captured: list[DatasetConfig] = []
+    import moxify_ocr.train.train as train_mod
+
+    original_dc = train_mod.DatasetConfig
+
+    def _spy(*args: object, **kwargs: object) -> DatasetConfig:
+        instance = original_dc(*args, **kwargs)  # type: ignore[arg-type]
+        captured.append(instance)
+        return instance
+
+    train_mod.DatasetConfig = _spy  # type: ignore[assignment]
+    try:
+        cfg = _yaml.safe_load(cfg_path.read_text())
+        _build_datasets(cfg)
+    finally:
+        train_mod.DatasetConfig = original_dc  # type: ignore[assignment]
+
+    # Two DatasetConfig instances were built: train then val.
+    assert len(captured) == 2, f"expected 2 DatasetConfigs, got {len(captured)}"
+    train_dc, val_dc = captured
+
+    # Train: cc/lc ratios must survive yaml -> _build_datasets -> DatasetConfig.
+    assert train_dc.split == "train"
+    assert train_dc.cardconjurer_ratio == 0.7
+    assert train_dc.line_compositor_ratio == 0.3
+    assert train_dc.cardconjurer_pool == Path(str(pool_root))
+    # manifest:-key read worked (would KeyError otherwise).
+    assert train_dc.manifest_path == Path(str(manifest_path))
+
+    # Val: must NOT have cc/lc ratios — must stay 100% real Scryfall.
+    assert val_dc.split == "val"
+    assert val_dc.cardconjurer_ratio == 0.0
+    assert val_dc.line_compositor_ratio == 0.0
+
+
 def test_dataset_routes_to_line_compositor_when_ratio_is_one(tmp_path: Path) -> None:
     """With line_compositor_ratio=1.0 every sample must come from the stitcher.
 

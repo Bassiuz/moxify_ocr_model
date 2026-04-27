@@ -6,46 +6,29 @@ Usage::
         --keras artifacts/name_v1/best.keras \\
         --out   artifacts/name_v1/name_v1.tflite
 
-Outputs a float32 TFLite file by default. Pass ``--int8-with-pool POOL_DIR``
-to produce an int8-quantized model using ~256 calibration images sampled
-from the rendered pool — typically 4× smaller and faster on phone CPUs.
+Outputs a float32 TFLite file by default (~13 MB). Pass ``--quantize`` for
+dynamic-range (weight-only int8) quantization which roughly halves the
+file. Note that *full* int8 isn't possible for our architecture: the
+BiLSTM cells route through SELECT_TF_OPS as float, and the int8
+calibration path requires the Flex delegate at calibration time which the
+host TF interpreter doesn't ship with. Dynamic-range quantization
+sidesteps this — weights get int8'd at conversion time, no calibration
+needed, runtime arithmetic stays in float.
+
+The output ``.tflite`` requires the **Flex delegate** at inference time
+because it embeds Select-TF ops for the BiLSTM. On Android add the
+``org.tensorflow:tensorflow-lite-select-tf-ops`` dependency; on iOS use
+the ``TensorFlowLiteSelectTfOps`` pod.
 """
 
 from __future__ import annotations
 
 import argparse
-import random
 from pathlib import Path
 
-import numpy as np
 import tensorflow as tf
 
-from moxify_ocr.data.name_dataset import NamePool
-from moxify_ocr.models.crnn import SqueezeHeight
-from moxify_ocr.models.name_region import NAME_INPUT_SHAPE
-
-
-def _representative_dataset(pool_root: Path, n: int = 256, seed: int = 0):
-    """Yield ``(image,)`` tensors from the rendered pool for int8 calibration."""
-    pool = NamePool.load(pool_root)
-    if not pool.entries:
-        raise SystemExit(f"empty pool at {pool_root} — cannot calibrate int8")
-    rng = random.Random(seed)
-    sample = rng.sample(pool.entries, min(n, len(pool.entries)))
-
-    def gen():
-        from PIL import Image
-
-        for entry in sample:
-            img = np.asarray(
-                Image.open(entry.image_path).convert("RGB"), dtype=np.uint8
-            )
-            assert img.shape == NAME_INPUT_SHAPE, (
-                f"unexpected pool image shape: {img.shape}"
-            )
-            yield [img[None].astype(np.float32)]
-
-    return gen
+from moxify_ocr.models.crnn import SqueezeHeight  # noqa: F401  used at load time
 
 
 def main() -> int:
@@ -57,16 +40,11 @@ def main() -> int:
         "--out", type=Path, required=True, help="Path to write the .tflite file."
     )
     parser.add_argument(
-        "--int8-with-pool",
-        type=Path,
-        default=None,
-        help="Quantize to int8 using calibration samples from this rendered pool.",
-    )
-    parser.add_argument(
-        "--n-calib",
-        type=int,
-        default=256,
-        help="Number of calibration samples (only used with --int8-with-pool).",
+        "--quantize",
+        action="store_true",
+        help="Apply dynamic-range (weight-only int8) quantization. Roughly "
+        "halves the file size; runtime activations stay float. No calibration "
+        "data needed.",
     )
     args = parser.parse_args()
 
@@ -85,17 +63,25 @@ def main() -> int:
 
     converter = tf.lite.TFLiteConverter.from_keras_model(model)
 
-    if args.int8_with_pool is not None:
-        print(f"int8 calibration from {args.int8_with_pool} ({args.n_calib} samples)")
+    # Our CRNN has BiLSTM cells whose ``TensorListReserve`` ops can't be
+    # lowered to TFLite builtins without a static element shape. The
+    # standard fix is to keep those ops as Select-TF (Flex) ops, which
+    # the TFLite runtime supports as long as the consumer bundles the
+    # Flex delegate. This is the recommended path for RNN-based OCR.
+    base_ops = [
+        tf.lite.OpsSet.TFLITE_BUILTINS,
+        tf.lite.OpsSet.SELECT_TF_OPS,
+    ]
+    converter.target_spec.supported_ops = base_ops
+    converter._experimental_lower_tensor_list_ops = False
+
+    if args.quantize:
+        # Dynamic-range quantization: weights → int8, activations stay
+        # float at runtime. No calibration needed, and it works alongside
+        # SELECT_TF_OPS (full int8 doesn't, because the calibrator needs
+        # the Flex delegate to run the LSTM during calibration).
         converter.optimizations = [tf.lite.Optimize.DEFAULT]
-        converter.representative_dataset = _representative_dataset(
-            args.int8_with_pool, n=args.n_calib
-        )
-        # Force fully-int8 ops; the input/output remain uint8 / int8 too so
-        # the consumer can skip the float32 cast on phone.
-        converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
-        converter.inference_input_type = tf.uint8
-        converter.inference_output_type = tf.float32  # keep logits in float for CTC
+        print("dynamic-range quantization enabled (weight-only int8)")
 
     tflite_bytes = converter.convert()
     args.out.write_bytes(tflite_bytes)

@@ -1,0 +1,465 @@
+"""PIL compositor for synthetic card-name region crops.
+
+Mirrors the role of :mod:`moxify_ocr.data.cardconjurer_dataset` from the
+bottom-region pipeline: turns :class:`NameSpec` objects into ``(image, label)``
+pairs the dataset reader can feed the CRNN.
+
+Unlike the bottom-region pipeline (which drives a real CardConjurer browser
+via Playwright) this module renders entirely in pure Python — it composites
+CardConjurer's *static* frame asset PNGs onto a colored background, then
+draws the card name with PIL.ImageDraw using fonts from the same asset
+bundle. No Chromium, no JavaScript, no network.
+
+The asset bundle lives at the path passed to :class:`NameRenderer` (default
+``/tmp/cardconjurer-master``). The expected layout is::
+
+    <root>/img/frames/<pack>/<color>.png   # 1500x2100 RGBA frame layers
+    <root>/fonts/<font>.ttf                # the bundled MTG-style fonts
+
+If a style's pack is missing the requested color, the renderer falls back to
+the closest available color (color matters for visual variety, not for
+correctness — the OCR target is the name text, not the frame color).
+"""
+
+from __future__ import annotations
+
+import random
+from dataclasses import dataclass
+from pathlib import Path
+from typing import ClassVar
+
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+
+from moxify_ocr.data.name_specs import NameSpec
+
+CARD_W: int = 1500
+CARD_H: int = 2100
+TARGET_W: int = 512
+TARGET_H: int = 48
+
+
+@dataclass(frozen=True)
+class StyleConfig:
+    """How to render one :class:`NameSpec` style.
+
+    Attributes:
+        frame_pack: Subpath under ``<root>/img/frames`` containing the color
+            PNGs for this style.
+        available_colors: Color-letter codes the pack actually has files for.
+            If the spec asks for a color outside this set we pick a fallback.
+        font: Font filename under ``<root>/fonts`` to render the name with.
+        font_size: Base size in pixels at the 1500x2100 canvas resolution.
+            ``NameSpec.font_size_jitter`` multiplies this per-sample.
+        text_color: RGB color for the name glyphs.
+        bbox: ``(x1, y1, x2, y2)`` of the name region inside the 1500x2100
+            canvas. The renderer left-aligns the text inside this box and
+            crops to the box for output.
+        rotate_cw_after_crop: For battle / split / aftermath / flip styles
+            whose name reads sideways on the printed card. After cropping
+            the bbox we rotate 90° clockwise so the model only sees
+            horizontal text — matching the upstream-cropper contract.
+        bg_palette: Per-color base background tones. The renderer picks the
+            entry matching ``spec.frame_color`` (or "M" as fallback).
+    """
+
+    frame_pack: str
+    available_colors: tuple[str, ...]
+    font: str
+    font_size: int
+    text_color: tuple[int, int, int]
+    bbox: tuple[int, int, int, int]
+    rotate_cw_after_crop: bool
+    # Filename format for the color PNG inside the pack. ``{c}`` is the
+    # lowercase color letter, ``{C}`` the uppercase. Default ``"{c}.png"``
+    # works for most packs; transform / DFC packs need ``"front{C}.png"``
+    # / ``"back{C}.png"`` etc.
+    filename_format: str = "{c}.png"
+
+
+# Background palette per frame color. Roughly matches the dominant tone of
+# the corresponding real-card frame so the synthetic compositor doesn't look
+# wildly off when the frame PNG has transparency in or near the name region.
+_BG_PALETTE: dict[str, tuple[int, int, int]] = {
+    "W": (235, 222, 188),  # cream
+    "U": (60, 100, 160),   # blue
+    "B": (45, 38, 38),     # dark gray-brown
+    "R": (170, 50, 40),    # red
+    "G": (40, 110, 60),    # green
+    "M": (190, 165, 100),  # gold
+    "A": (140, 145, 150),  # silver/slate
+    "L": (140, 105, 75),   # brown
+}
+
+# Fallback when a pack lacks the requested color.
+_COLOR_FALLBACK_ORDER: tuple[str, ...] = ("M", "A", "C", "W", "U", "B", "R", "G", "L")
+
+
+# Per-style asset + geometry table. Coordinates are tuned to land the name
+# box on the visible name strip for each frame era; smoke-test expected to
+# refine these.
+STYLE_TABLE: dict[str, StyleConfig] = {
+    # Modern (2015 / M15) — the dominant prior.
+    "modern_regular": StyleConfig(
+        frame_pack="m15/regular",
+        available_colors=("w", "u", "b", "r", "g", "m", "a", "l"),
+        font="beleren-b.ttf",
+        font_size=70,
+        text_color=(0, 0, 0),
+        bbox=(110, 130, 1380, 220),
+        rotate_cw_after_crop=False,
+    ),
+    "modern_legendary": StyleConfig(
+        # CC's m15/crowns uses non-standard filenames; for v1 we fall back
+        # to the regular m15 frame and accept the loss of legendary
+        # filigree (the bbox is what matters for OCR coverage; smoke test
+        # will tell us if real-card legendary names regress without it).
+        frame_pack="m15/regular",
+        available_colors=("w", "u", "b", "r", "g", "m", "a", "l"),
+        font="beleren-b.ttf",
+        font_size=68,
+        text_color=(0, 0, 0),
+        bbox=(135, 138, 1380, 230),
+        rotate_cw_after_crop=False,
+    ),
+    "modern_extended": StyleConfig(
+        frame_pack="m15/regular",
+        available_colors=("w", "u", "b", "r", "g", "m", "a", "l"),
+        font="beleren-b.ttf",
+        font_size=70,
+        text_color=(0, 0, 0),
+        bbox=(110, 130, 1380, 220),
+        rotate_cw_after_crop=False,
+    ),
+    "modern_borderless": StyleConfig(
+        frame_pack="m15/regular",
+        available_colors=("w", "u", "b", "r", "g", "m", "a", "l"),
+        font="beleren-b.ttf",
+        font_size=70,
+        text_color=(0, 0, 0),
+        bbox=(110, 130, 1380, 220),
+        rotate_cw_after_crop=False,
+    ),
+    "modern_showcase_storybook": StyleConfig(
+        frame_pack="storybook",
+        available_colors=("w", "u", "b", "r", "g", "m", "c"),
+        font="goudy-medieval.ttf",
+        font_size=72,
+        text_color=(40, 30, 20),
+        bbox=(180, 110, 1320, 220),
+        rotate_cw_after_crop=False,
+    ),
+    "modern_showcase_kaldheim": StyleConfig(
+        frame_pack="kaldheim",
+        available_colors=("w", "u", "b", "r", "g", "m"),
+        font="beleren-b.ttf",
+        font_size=70,
+        text_color=(0, 0, 0),
+        bbox=(110, 130, 1380, 220),
+        rotate_cw_after_crop=False,
+    ),
+    "modern_showcase_tarkir": StyleConfig(
+        frame_pack="tarkir",
+        available_colors=("w", "u", "b", "r", "g", "m"),
+        font="beleren-b.ttf",
+        font_size=70,
+        text_color=(0, 0, 0),
+        bbox=(110, 130, 1380, 220),
+        rotate_cw_after_crop=False,
+    ),
+    "modern_showcase_neo": StyleConfig(
+        frame_pack="neo",
+        available_colors=("w", "u", "b", "r", "g", "m"),
+        font="beleren-b.ttf",
+        font_size=70,
+        text_color=(255, 255, 255),
+        bbox=(110, 130, 1380, 220),
+        rotate_cw_after_crop=False,
+    ),
+    # Pre-modern.
+    "premodern_2003": StyleConfig(
+        frame_pack="8th",
+        available_colors=("w", "u", "b", "r", "g", "m", "a", "l"),
+        font="matrix.ttf",
+        font_size=78,
+        text_color=(0, 0, 0),
+        bbox=(110, 105, 1380, 200),
+        rotate_cw_after_crop=False,
+    ),
+    "premodern_1997": StyleConfig(
+        frame_pack="seventh/regular",
+        available_colors=("w", "u", "b", "r", "g", "m", "a", "l"),
+        font="matrix.ttf",
+        font_size=78,
+        text_color=(0, 0, 0),
+        bbox=(110, 105, 1380, 200),
+        rotate_cw_after_crop=False,
+    ),
+    "old_1993": StyleConfig(
+        frame_pack="old/abu",
+        available_colors=("w", "u", "b", "r", "g", "m", "a", "l", "bl"),
+        font="matrix.ttf",
+        font_size=82,
+        text_color=(0, 0, 0),
+        bbox=(110, 95, 1380, 200),
+        rotate_cw_after_crop=False,
+    ),
+    "old_8th": StyleConfig(
+        frame_pack="8th",
+        available_colors=("w", "u", "b", "r", "g", "m", "a", "l"),
+        font="matrix.ttf",
+        font_size=78,
+        text_color=(0, 0, 0),
+        bbox=(110, 105, 1380, 200),
+        rotate_cw_after_crop=False,
+    ),
+    "future_sight": StyleConfig(
+        frame_pack="future",
+        available_colors=("white", "gray"),  # the FUT pack uses prefix names
+        font="beleren-b.ttf",
+        font_size=66,
+        text_color=(0, 0, 0),
+        bbox=(110, 120, 1380, 210),
+        rotate_cw_after_crop=False,
+    ),
+    # Special layouts.
+    "saga": StyleConfig(
+        frame_pack="saga",
+        available_colors=("w", "u", "b", "r", "g", "m", "a"),
+        font="beleren-b.ttf",
+        font_size=68,
+        text_color=(0, 0, 0),
+        bbox=(140, 130, 1380, 220),
+        rotate_cw_after_crop=False,
+    ),
+    "battle": StyleConfig(
+        frame_pack="m15/battle",
+        available_colors=("w", "u", "b", "r", "g", "m", "a", "c", "l"),
+        font="beleren-b.ttf",
+        font_size=70,
+        # Battle frames are rendered at 1500x2100 with the "title" strip
+        # running down the LEFT edge of the canvas. We render text into the
+        # top-left bbox in normal orientation, then rotate 90° CW so it
+        # comes out as a horizontal name strip.
+        text_color=(0, 0, 0),
+        bbox=(110, 130, 1380, 220),
+        rotate_cw_after_crop=False,
+    ),
+    "split_left": StyleConfig(
+        frame_pack="m15/split",
+        available_colors=("w", "u", "b", "r", "g", "m", "a"),
+        font="beleren-b.ttf",
+        font_size=58,
+        text_color=(0, 0, 0),
+        bbox=(110, 130, 1380, 210),
+        rotate_cw_after_crop=False,
+    ),
+    "split_right": StyleConfig(
+        frame_pack="m15/split",
+        available_colors=("w", "u", "b", "r", "g", "m", "a"),
+        font="beleren-b.ttf",
+        font_size=58,
+        text_color=(0, 0, 0),
+        bbox=(110, 1080, 1380, 1170),
+        rotate_cw_after_crop=False,
+    ),
+    "adventure": StyleConfig(
+        frame_pack="adventure/regular",
+        available_colors=("w", "u", "b", "r", "g", "m", "a", "l"),
+        font="beleren-b.ttf",
+        font_size=70,
+        text_color=(0, 0, 0),
+        bbox=(110, 130, 1380, 220),
+        rotate_cw_after_crop=False,
+    ),
+    "transform_front": StyleConfig(
+        frame_pack="m15/transform/regular",
+        available_colors=("w", "u", "b", "r", "g", "m", "a", "l"),
+        font="beleren-b.ttf",
+        font_size=66,
+        text_color=(0, 0, 0),
+        bbox=(150, 130, 1380, 220),
+        rotate_cw_after_crop=False,
+        filename_format="front{C}.png",
+    ),
+    "transform_back": StyleConfig(
+        frame_pack="m15/transform/regular",
+        available_colors=("w", "u", "b", "r", "g", "m", "a", "l"),
+        font="beleren-b.ttf",
+        font_size=66,
+        text_color=(255, 255, 255),
+        bbox=(150, 130, 1380, 220),
+        rotate_cw_after_crop=False,
+        filename_format="back{C}.png",
+    ),
+    "modal_dfc_front": StyleConfig(
+        frame_pack="m15/transform/regular",
+        available_colors=("w", "u", "b", "r", "g", "m", "a", "l"),
+        font="beleren-b.ttf",
+        font_size=66,
+        text_color=(0, 0, 0),
+        bbox=(150, 130, 1380, 220),
+        rotate_cw_after_crop=False,
+        filename_format="front{C}.png",
+    ),
+    "modal_dfc_back": StyleConfig(
+        frame_pack="m15/transform/regular",
+        available_colors=("w", "u", "b", "r", "g", "m", "a", "l"),
+        font="beleren-b.ttf",
+        font_size=66,
+        text_color=(0, 0, 0),
+        bbox=(150, 130, 1380, 220),
+        rotate_cw_after_crop=False,
+        filename_format="back{C}.png",
+    ),
+    "planeswalker": StyleConfig(
+        frame_pack="planeswalker",
+        available_colors=("w", "u", "b", "r", "g", "m"),
+        font="beleren-b.ttf",
+        font_size=70,
+        text_color=(0, 0, 0),
+        bbox=(110, 130, 1380, 220),
+        rotate_cw_after_crop=False,
+    ),
+    "aftermath": StyleConfig(
+        frame_pack="m15/aftermath",
+        available_colors=("w", "u", "b", "r", "g", "m", "a", "l"),
+        font="beleren-b.ttf",
+        font_size=64,
+        text_color=(0, 0, 0),
+        bbox=(110, 130, 1380, 220),
+        rotate_cw_after_crop=False,
+    ),
+    "flip": StyleConfig(
+        frame_pack="m15/flip",
+        available_colors=("w", "u", "b", "r", "g", "m", "a", "l", "c"),
+        font="beleren-b.ttf",
+        font_size=66,
+        text_color=(0, 0, 0),
+        bbox=(110, 130, 1380, 220),
+        rotate_cw_after_crop=False,
+    ),
+}
+
+
+class NameRenderer:
+    """Stateful renderer; caches frame PNGs and font objects across calls."""
+
+    DEFAULT_ROOT: ClassVar[Path] = Path("/tmp/cardconjurer-master")
+
+    def __init__(
+        self,
+        *,
+        cardconjurer_root: Path | None = None,
+    ) -> None:
+        root = cardconjurer_root or self.DEFAULT_ROOT
+        if not root.exists():
+            raise FileNotFoundError(
+                f"cardconjurer root not found at {root} — see "
+                "infra/cardconjurer/README.md for one-time setup"
+            )
+        self._frames_root = root / "img" / "frames"
+        self._fonts_root = root / "fonts"
+        self._font_cache: dict[tuple[str, int], ImageFont.FreeTypeFont] = {}
+        self._frame_cache: dict[Path, Image.Image] = {}
+
+    def render(self, spec: NameSpec) -> tuple[np.ndarray, str]:
+        """Render one ``NameSpec`` to a ``(48, 512, 3) uint8`` ndarray + label."""
+        style = STYLE_TABLE[spec.style]
+        frame = self._load_frame(style, spec.frame_color, seed=hash(spec) & 0xFFFFFFFF)
+        bg_color = _BG_PALETTE.get(spec.frame_color, _BG_PALETTE["M"])
+        canvas = Image.new("RGB", (CARD_W, CARD_H), bg_color)
+        canvas.paste(frame, (0, 0), frame)
+        self._draw_name(canvas, spec, style)
+        # Crop the name region.
+        crop = canvas.crop(style.bbox)
+        if style.rotate_cw_after_crop:
+            crop = crop.rotate(-90, expand=True)
+        # Resize to the model's input shape.
+        crop = crop.resize((TARGET_W, TARGET_H), Image.LANCZOS)
+        arr = np.asarray(crop.convert("RGB"), dtype=np.uint8)
+        return arr, spec.name
+
+    # ---- internals ----
+
+    def _load_font(self, name: str, size: int) -> ImageFont.FreeTypeFont:
+        key = (name, size)
+        font = self._font_cache.get(key)
+        if font is None:
+            path = self._fonts_root / name
+            font = ImageFont.truetype(str(path), size)
+            self._font_cache[key] = font
+        return font
+
+    def _load_frame(
+        self, style: StyleConfig, frame_color: str, *, seed: int
+    ) -> Image.Image:
+        """Resolve the frame PNG path and return a cached RGBA image."""
+        color_letter = self._resolve_color(style, frame_color, seed=seed)
+        filename = style.filename_format.format(
+            c=color_letter.lower(), C=color_letter.upper()
+        )
+        path = self._frames_root / style.frame_pack / filename
+        cached = self._frame_cache.get(path)
+        if cached is not None:
+            return cached
+        if not path.exists():
+            # Fall back: pick any available color file in the pack.
+            pack_dir = self._frames_root / style.frame_pack
+            candidates = sorted(
+                p for p in pack_dir.glob("*.png")
+                if "thumb" not in p.name.lower() and "mask" not in p.name.lower()
+            )
+            if not candidates:
+                raise FileNotFoundError(
+                    f"no usable frame PNGs in {pack_dir} for style "
+                    f"{style.frame_pack!r}"
+                )
+            path = candidates[seed % len(candidates)]
+        img = Image.open(path).convert("RGBA")
+        if img.size != (CARD_W, CARD_H):
+            img = img.resize((CARD_W, CARD_H), Image.LANCZOS)
+        self._frame_cache[path] = img
+        return img
+
+    @staticmethod
+    def _resolve_color(
+        style: StyleConfig, frame_color: str, *, seed: int
+    ) -> str:
+        """Map a spec's frame_color (uppercase letter) to a pack file stem."""
+        target = frame_color.lower()
+        if target in style.available_colors:
+            return target
+        # Fallback chain: try the canonical preference order, then any.
+        for cand in _COLOR_FALLBACK_ORDER:
+            cl = cand.lower()
+            if cl in style.available_colors:
+                return cl
+        # Last resort: pick the first available color deterministically.
+        rng = random.Random(seed)
+        return rng.choice(style.available_colors)
+
+    def _draw_name(
+        self, canvas: Image.Image, spec: NameSpec, style: StyleConfig
+    ) -> None:
+        size = max(20, int(style.font_size * spec.font_size_jitter))
+        font = self._load_font(style.font, size)
+        draw = ImageDraw.Draw(canvas)
+        x1, y1, x2, y2 = style.bbox
+        # Auto-shrink the font if the name doesn't fit the bbox width. Rare
+        # for normal names but real for the longest ones (e.g.
+        # "Asmoranomardicadaistinaculdacar").
+        max_w = x2 - x1 - 20
+        text = spec.name
+        while size > 24:
+            bbox = draw.textbbox((0, 0), text, font=font)
+            text_w = bbox[2] - bbox[0]
+            if text_w <= max_w:
+                break
+            size = int(size * 0.92)
+            font = self._load_font(style.font, size)
+        # Vertical center inside the bbox.
+        bbox = draw.textbbox((0, 0), text, font=font)
+        text_h = bbox[3] - bbox[1]
+        y_off = y1 + max(0, (y2 - y1 - text_h) // 2) - bbox[1]
+        draw.text((x1 + 8, y_off), text, fill=style.text_color, font=font)

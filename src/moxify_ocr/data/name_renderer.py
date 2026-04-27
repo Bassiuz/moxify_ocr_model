@@ -150,7 +150,7 @@ _COLOR_FALLBACK_ORDER: tuple[str, ...] = ("M", "A", "C", "W", "U", "B", "R", "G"
 STYLE_TABLE: dict[str, StyleConfig] = {
     # Modern (2015 / M15) — the dominant prior.
     "modern_regular": StyleConfig(
-        frame_pack="m15/regular",
+        frame_pack="m15/new",
         available_colors=("w", "u", "b", "r", "g", "m", "a", "l"),
         font="beleren-b.ttf",
         font_size=70,
@@ -163,7 +163,7 @@ STYLE_TABLE: dict[str, StyleConfig] = {
         # to the regular m15 frame and accept the loss of legendary
         # filigree (the bbox is what matters for OCR coverage; smoke test
         # will tell us if real-card legendary names regress without it).
-        frame_pack="m15/regular",
+        frame_pack="m15/new",
         available_colors=("w", "u", "b", "r", "g", "m", "a", "l"),
         font="beleren-b.ttf",
         font_size=68,
@@ -172,7 +172,7 @@ STYLE_TABLE: dict[str, StyleConfig] = {
         rotate_cw_after_crop=False,
     ),
     "modern_extended": StyleConfig(
-        frame_pack="m15/regular",
+        frame_pack="m15/new",
         available_colors=("w", "u", "b", "r", "g", "m", "a", "l"),
         font="beleren-b.ttf",
         font_size=70,
@@ -181,13 +181,14 @@ STYLE_TABLE: dict[str, StyleConfig] = {
         rotate_cw_after_crop=False,
     ),
     "modern_borderless": StyleConfig(
-        frame_pack="m15/regular",
+        frame_pack="m15/borderless",
         available_colors=("w", "u", "b", "r", "g", "m", "a", "l"),
         font="beleren-b.ttf",
         font_size=70,
         text_color=None,
         bbox=(110, 130, 1380, 220),
         rotate_cw_after_crop=False,
+        filename_format="m15GenericShowcaseFrame{C}.png",
     ),
     "modern_showcase_storybook": StyleConfig(
         frame_pack="storybook",
@@ -200,12 +201,13 @@ STYLE_TABLE: dict[str, StyleConfig] = {
     ),
     "modern_showcase_kaldheim": StyleConfig(
         frame_pack="kaldheim",
-        available_colors=("w", "u", "b", "r", "g", "m"),
+        available_colors=("w", "u", "b", "r", "g", "m", "a"),
         font="beleren-b.ttf",
         font_size=70,
         text_color=None,
         bbox=(110, 130, 1380, 220),
         rotate_cw_after_crop=False,
+        filename_format="frame{C}.png",
     ),
     "modern_showcase_tarkir": StyleConfig(
         frame_pack="tarkir",
@@ -246,7 +248,9 @@ STYLE_TABLE: dict[str, StyleConfig] = {
     ),
     "old_1993": StyleConfig(
         frame_pack="old/abu",
-        available_colors=("w", "u", "b", "r", "g", "m", "a", "l", "bl"),
+        # 1993 ABU pack has no multicolor (m); spec generator's M color
+        # falls back via _resolve_color to A or L, which both exist.
+        available_colors=("w", "u", "b", "r", "g", "a", "l"),
         font="matrix.ttf",
         font_size=82,
         text_color=None,
@@ -263,23 +267,29 @@ STYLE_TABLE: dict[str, StyleConfig] = {
         rotate_cw_after_crop=False,
     ),
     "future_sight": StyleConfig(
+        # The Future Sight pack only ships ``futureWhite.png`` and
+        # ``futureGray.png``; we use Gray for everything (it's the dominant
+        # FUT visual treatment). The filename_format below has no {c}/{C}
+        # placeholders, so str.format leaves it as a literal.
         frame_pack="future",
-        available_colors=("white", "gray"),  # the FUT pack uses prefix names
+        available_colors=("gray",),
         font="beleren-b.ttf",
         font_size=66,
         text_color=None,
         bbox=(110, 120, 1380, 210),
         rotate_cw_after_crop=False,
+        filename_format="futureGray.png",
     ),
     # Special layouts.
     "saga": StyleConfig(
-        frame_pack="saga",
+        frame_pack="saga/regular",
         available_colors=("w", "u", "b", "r", "g", "m", "a"),
         font="beleren-b.ttf",
         font_size=68,
         text_color=None,
         bbox=(140, 130, 1380, 220),
         rotate_cw_after_crop=False,
+        filename_format="sagaFrame{C}.png",
     ),
     # Battle / split frames have their name slots running sideways on the
     # actual card. The OCR contract is that the upstream cropper pre-rotates
@@ -289,7 +299,7 @@ STYLE_TABLE: dict[str, StyleConfig] = {
     # deferred to v2 (it requires drawing rotated text in a slot that the
     # m15/{battle,split} frame PNGs only suggest indirectly).
     "battle": StyleConfig(
-        frame_pack="m15/regular",
+        frame_pack="m15/new",
         available_colors=("w", "u", "b", "r", "g", "m", "a", "l"),
         font="beleren-b.ttf",
         font_size=58,
@@ -298,7 +308,7 @@ STYLE_TABLE: dict[str, StyleConfig] = {
         rotate_cw_after_crop=False,
     ),
     "split_left": StyleConfig(
-        frame_pack="m15/regular",
+        frame_pack="m15/new",
         available_colors=("w", "u", "b", "r", "g", "m", "a"),
         font="beleren-b.ttf",
         font_size=54,
@@ -307,7 +317,7 @@ STYLE_TABLE: dict[str, StyleConfig] = {
         rotate_cw_after_crop=False,
     ),
     "split_right": StyleConfig(
-        frame_pack="m15/regular",
+        frame_pack="m15/new",
         available_colors=("w", "u", "b", "r", "g", "m", "a"),
         font="beleren-b.ttf",
         font_size=54,
@@ -374,13 +384,14 @@ STYLE_TABLE: dict[str, StyleConfig] = {
         text_left_inset=230,
     ),
     "planeswalker": StyleConfig(
-        frame_pack="planeswalker",
+        frame_pack="planeswalker/regular",
         available_colors=("w", "u", "b", "r", "g", "m"),
         font="beleren-b.ttf",
         font_size=70,
         text_color=None,
         bbox=(110, 130, 1380, 220),
         rotate_cw_after_crop=False,
+        filename_format="planeswalkerFrame{C}.png",
     ),
     "aftermath": StyleConfig(
         frame_pack="m15/aftermath",
@@ -498,24 +509,16 @@ class NameRenderer:
         if cached is not None:
             return cached
         if not path.exists():
-            # Fall back: pick any color-letter PNG in the pack. Excludes
-            # thumbs, masks, and named helpers (stamp / holo / border /
-            # frame.svg-like assets) which would render as garbage if loaded
-            # as the main frame.
-            pack_dir = self._frames_root / style.frame_pack
-            disallow = ("thumb", "mask", "stamp", "holo", "border", "frame")
-            candidates = sorted(
-                p
-                for p in pack_dir.glob("*.png")
-                if not any(bad in p.stem.lower() for bad in disallow)
+            # Strict mode: a missing frame PNG is a configuration bug, not
+            # something to paper over. Earlier silent fallbacks landed on
+            # wrong assets (e.g. m15/regular/eldrazi.png for every modern
+            # card, kaldheim/ptA.png for kaldheim showcases) which corrupted
+            # the training pool without raising. We require the exact
+            # ``frame_pack`` + ``filename_format`` to resolve.
+            raise FileNotFoundError(
+                f"frame PNG not found: {path}. Check STYLE_TABLE['{style.frame_pack}'] "
+                f"— frame_pack and filename_format must point to a real file."
             )
-            if not candidates:
-                raise FileNotFoundError(
-                    f"no usable frame PNGs in {pack_dir} for style "
-                    f"{style.frame_pack!r} (filename {filename!r} not found, "
-                    "and no color-letter PNG fallbacks)"
-                )
-            path = candidates[seed % len(candidates)]
         img = Image.open(path).convert("RGBA")
         if img.size != (CARD_W, CARD_H):
             img = img.resize((CARD_W, CARD_H), Image.LANCZOS)

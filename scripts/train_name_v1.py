@@ -142,6 +142,7 @@ def main() -> int:
         encode_fn=encode,
         batch_size=batch_size,
         shuffle_buffer=int(cfg["data"]["shuffle_buffer"]),
+        repeat=True,  # required when model.fit gets steps_per_epoch
         seed=seed,
     )
     val_ds = build_tf_dataset(
@@ -149,6 +150,7 @@ def main() -> int:
         encode_fn=encode,
         batch_size=batch_size,
         shuffle_buffer=0,
+        repeat=False,  # val must iterate each sample exactly once per epoch
         seed=seed,
     )
 

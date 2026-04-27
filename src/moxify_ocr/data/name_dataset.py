@@ -98,6 +98,7 @@ def build_tf_dataset(
     encode_fn,  # type: ignore[no-untyped-def]  # local arg, see _make_train_step in caller
     batch_size: int,
     shuffle_buffer: int,
+    repeat: bool = False,
     seed: int = 0,
 ) -> "tf.data.Dataset":  # noqa: F821 — quoted; tf imported lazily to keep this module light
     """Build a `tf.data.Dataset` of `(image_uint8, label_dense_int32)` batches.
@@ -105,6 +106,14 @@ def build_tf_dataset(
     ``encode_fn(label_str) -> list[int]`` maps a label to 1-based class
     indices; passed in so this module doesn't need to know about a specific
     alphabet.
+
+    Set ``repeat=True`` for the *train* pipeline when ``model.fit`` is called
+    with ``steps_per_epoch``: Keras consumes ``steps_per_epoch * epochs``
+    batches and a finite dataset only yields ``len(pool) / batch_size`` of
+    them — without ``.repeat()`` Keras emits a "ran out of data" warning at
+    epoch 2 and silently no-ops the remaining epochs. Validation pipelines
+    must stay finite (``repeat=False``) so end-of-epoch evaluation iterates
+    each val sample once.
 
     The dense label tensor is zero-padded to the max length in each batch
     (zero is the CTC blank, also doubling as padding — the loss strips it).
@@ -136,6 +145,8 @@ def build_tf_dataset(
     if shuffle_buffer > 0:
         ds = ds.shuffle(shuffle_buffer, seed=seed, reshuffle_each_iteration=True)
     ds = ds.map(_load, num_parallel_calls=tf.data.AUTOTUNE)
+    if repeat:
+        ds = ds.repeat()
     ds = ds.batch(batch_size, drop_remainder=False)
     ds = ds.prefetch(tf.data.AUTOTUNE)
     return ds

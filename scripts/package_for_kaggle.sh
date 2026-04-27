@@ -6,9 +6,10 @@
 #     scripts/package_for_kaggle.sh                  # default pool dir
 #     scripts/package_for_kaggle.sh data/synth_names/v2  # different pool
 #
-# Outputs:
-#     /tmp/moxify-ocr-source.zip
-#     /tmp/<pool-dir-basename>.zip
+# Outputs (under the gitignored artifacts/ dir so they're easy to find in
+# Finder/Files but won't get accidentally committed):
+#     artifacts/kaggle/moxify-ocr-source.zip
+#     artifacts/kaggle/moxify-ocr-name-pool-<basename>.zip
 #
 # Upload each as a separate Kaggle dataset (one zip per dataset). The slugs
 # you pick on Kaggle will need to match SOURCE_DATASET / POOL_DATASET in the
@@ -17,6 +18,8 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 POOL_DIR="${1:-data/synth_names/v1}"
+OUT_DIR="$REPO_ROOT/artifacts/kaggle"
+mkdir -p "$OUT_DIR"
 
 if [ ! -d "$REPO_ROOT/$POOL_DIR" ]; then
   echo "pool dir not found: $REPO_ROOT/$POOL_DIR" >&2
@@ -25,7 +28,7 @@ if [ ! -d "$REPO_ROOT/$POOL_DIR" ]; then
 fi
 
 # 1. Source zip — repo root minus heavy/local-only dirs.
-SRC_ZIP=/tmp/moxify-ocr-source.zip
+SRC_ZIP="$OUT_DIR/moxify-ocr-source.zip"
 rm -f "$SRC_ZIP"
 cd "$REPO_ROOT"
 zip -rq "$SRC_ZIP" . \
@@ -44,7 +47,7 @@ echo "wrote $SRC_ZIP ($(du -h "$SRC_ZIP" | cut -f1))"
 # 2. Pool zip — images/ + labels.jsonl. Keep them at the zip root so the
 # notebook's pool_root is the dataset mount directly (no nested dir).
 POOL_BASENAME="$(basename "$POOL_DIR")"
-POOL_ZIP="/tmp/moxify-ocr-name-pool-${POOL_BASENAME}.zip"
+POOL_ZIP="$OUT_DIR/moxify-ocr-name-pool-${POOL_BASENAME}.zip"
 rm -f "$POOL_ZIP"
 cd "$REPO_ROOT/$POOL_DIR"
 zip -rq "$POOL_ZIP" images/ labels.jsonl

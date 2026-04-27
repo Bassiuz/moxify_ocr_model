@@ -303,6 +303,39 @@ def _jsonl_row(spec: CardSpec, image_rel_path: str) -> dict[str, object]:
     return row
 
 
+def _read_completed_indices(labels_path: Path) -> set[int]:
+    """Parse an existing ``labels.jsonl`` to find which spec indices are done.
+
+    Used for resume support: if a previous run was interrupted (laptop closed,
+    container died, ^C), we can pick up where we left off rather than starting
+    from spec 0 and producing duplicate label rows.
+
+    Returns the empty set if the file doesn't exist. Tolerant of a partial /
+    truncated last line caused by a hard kill mid-write — that line is skipped
+    and the corresponding index is treated as not-yet-done.
+    """
+    if not labels_path.exists():
+        return set()
+    completed: set[int] = set()
+    prefix, suffix = "images/", ".png"
+    with labels_path.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                # Probably a partial last line — caller will re-render this index.
+                continue
+            ip = row.get("image_path", "")
+            if isinstance(ip, str) and ip.startswith(prefix) and ip.endswith(suffix):
+                idx = ip[len(prefix) : -len(suffix)]
+                if idx.isdigit():
+                    completed.add(int(idx))
+    return completed
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=("Render a pool of CardConjurer bottom-strip crops + labels to disk.")
@@ -338,9 +371,18 @@ def main(argv: list[str] | None = None) -> int:
         flush=True,
     )
 
+    completed_indices = _read_completed_indices(labels_path)
+    if completed_indices:
+        print(
+            f"resuming: {len(completed_indices)} specs already done, "
+            f"skipping those and rendering the rest",
+            flush=True,
+        )
+
     t_start = time.time()
     succeeded = 0
     failed = 0
+    skipped = 0
     consecutive_failures = 0
 
     with sync_playwright() as p:
@@ -349,6 +391,9 @@ def main(argv: list[str] | None = None) -> int:
         try:
             with labels_path.open("a", encoding="utf-8") as label_fp:
                 for i, spec in enumerate(generate_specs(args.n, args.seed)):
+                    if i in completed_indices:
+                        skipped += 1
+                        continue
                     if i > 0 and i % _TAB_RESTART_EVERY == 0:
                         # Defensive: close + reopen the tab to free any
                         # accumulated DOM/canvas memory. Browser stays up so
@@ -403,11 +448,18 @@ def main(argv: list[str] | None = None) -> int:
 
                     if (i + 1) % _PROGRESS_EVERY == 0:
                         elapsed = time.time() - t_start
-                        rate = elapsed / (i + 1)
-                        eta = rate * (args.n - (i + 1))
+                        # Base rate on actually-rendered specs (this run);
+                        # skipped indices on resume don't cost wall-time.
+                        if succeeded > 0:
+                            rate = elapsed / succeeded
+                            remaining = args.n - succeeded - skipped
+                            eta = rate * max(remaining, 0)
+                        else:
+                            rate = 0.0
+                            eta = 0.0
                         print(
                             f"[{i + 1}/{args.n}] ok={succeeded} fail={failed} "
-                            f"elapsed={elapsed:.1f}s "
+                            f"skip={skipped} elapsed={elapsed:.1f}s "
                             f"rate={rate:.2f}s/card eta={_format_eta(eta)}",
                             flush=True,
                         )
@@ -417,8 +469,11 @@ def main(argv: list[str] | None = None) -> int:
             browser.close()
 
     elapsed = time.time() - t_start
+    pool_size = succeeded + skipped
     print(
-        f"done: {succeeded}/{args.n} ok, {failed} failed, elapsed={_format_eta(elapsed)}",
+        f"done: this run rendered {succeeded} (skipped {skipped} already-done, "
+        f"{failed} failed), pool size {pool_size}/{args.n}, "
+        f"elapsed={_format_eta(elapsed)}",
         flush=True,
     )
     return 0 if failed == 0 else 1

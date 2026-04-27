@@ -1,0 +1,22 @@
+# v1 config — card-name OCR; synthetic-only train + val.
+#
+# v1 is synthetic-only: both train and val draw from a single pre-rendered
+# pool, split by name hash so no card name appears in both. This proves the
+# end-to-end pipeline (renderer → CRNN → CTC); validating against real card
+# scans is deferred to v2 once we have a labeled real-name manifest.
+#
+# Render the pool first:
+#   .venv/bin/python scripts/render_name_pool.py --n 50000 --seed 0 \
+#       --out-dir data/synth_names/v1
+data:
+  pool_root: data/synth_names/v1
+  val_fraction: 0.10                   # 10% of unique names held out for val
+  batch_size: 128                      # smaller than bottom-region's 192 because the input is 2x wider
+  shuffle_buffer: 4096
+
+train:
+  epochs: 25
+  lr: 5.0e-4
+  warmup_steps: 2000
+  seed: 0
+  output_dir: artifacts/name_v1

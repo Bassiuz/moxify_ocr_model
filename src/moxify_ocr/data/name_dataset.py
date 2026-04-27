@@ -68,3 +68,74 @@ def sample_from_pool(pool: NamePool, *, seed: int) -> tuple[np.ndarray, str]:
     entry = rng.choice(pool.entries)
     img = np.asarray(Image.open(entry.image_path).convert("RGB"), dtype=np.uint8)
     return img, entry.label
+
+
+def split_pool(
+    pool: NamePool, *, val_fraction: float = 0.1, seed: int = 0
+) -> tuple[NamePool, NamePool]:
+    """Deterministically split a pool into (train, val) by hashing the label.
+
+    Splitting by *label* (not by image index) means the same card name never
+    appears in both train and val — so val genuinely measures generalization
+    to held-out names, not memorization of seen ones rendered with a
+    different frame.
+    """
+    import hashlib
+
+    train: list[_PoolEntry] = []
+    val: list[_PoolEntry] = []
+    val_threshold = int(val_fraction * 2**32)
+    for entry in pool.entries:
+        h = hashlib.md5(f"{seed}:{entry.label}".encode()).digest()
+        bucket = int.from_bytes(h[:4], "big")
+        (val if bucket < val_threshold else train).append(entry)
+    return NamePool(entries=train), NamePool(entries=val)
+
+
+def build_tf_dataset(
+    pool: NamePool,
+    *,
+    encode_fn,  # type: ignore[no-untyped-def]  # local arg, see _make_train_step in caller
+    batch_size: int,
+    shuffle_buffer: int,
+    seed: int = 0,
+) -> "tf.data.Dataset":  # noqa: F821 — quoted; tf imported lazily to keep this module light
+    """Build a `tf.data.Dataset` of `(image_uint8, label_dense_int32)` batches.
+
+    ``encode_fn(label_str) -> list[int]`` maps a label to 1-based class
+    indices; passed in so this module doesn't need to know about a specific
+    alphabet.
+
+    The dense label tensor is zero-padded to the max length in each batch
+    (zero is the CTC blank, also doubling as padding — the loss strips it).
+    Images are passed through as ``uint8``; the CRNN normalizes internally.
+    """
+    import numpy as np
+    import tensorflow as tf
+
+    if not pool.entries:
+        raise ValueError("cannot build a tf.data.Dataset from an empty pool")
+
+    paths = np.array([str(e.image_path) for e in pool.entries], dtype=object)
+    labels = [encode_fn(e.label) for e in pool.entries]
+    label_lens = np.array([len(lbl) for lbl in labels], dtype=np.int32)
+    max_len = int(label_lens.max())
+    padded = np.zeros((len(labels), max_len), dtype=np.int32)
+    for i, lbl in enumerate(labels):
+        padded[i, : len(lbl)] = lbl
+
+    def _load(path_t: "tf.Tensor", lbl_t: "tf.Tensor") -> tuple["tf.Tensor", "tf.Tensor"]:
+        raw = tf.io.read_file(path_t)
+        img = tf.io.decode_png(raw, channels=3)  # uint8
+        img.set_shape([48, 512, 3])
+        return img, lbl_t
+
+    ds = tf.data.Dataset.from_tensor_slices(
+        (tf.constant(paths.astype(str)), tf.constant(padded))
+    )
+    if shuffle_buffer > 0:
+        ds = ds.shuffle(shuffle_buffer, seed=seed, reshuffle_each_iteration=True)
+    ds = ds.map(_load, num_parallel_calls=tf.data.AUTOTUNE)
+    ds = ds.batch(batch_size, drop_remainder=False)
+    ds = ds.prefetch(tf.data.AUTOTUNE)
+    return ds

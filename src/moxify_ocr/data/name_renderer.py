@@ -180,11 +180,11 @@ STYLE_TABLE: dict[str, StyleConfig] = {
         rotate_cw_after_crop=False,
     ),
     "modern_showcase_neo": StyleConfig(
-        frame_pack="neo",
-        available_colors=("w", "u", "b", "r", "g", "m"),
+        frame_pack="neo/neon",
+        available_colors=("w", "u", "b", "r", "g", "m", "a"),
         font="beleren-b.ttf",
         font_size=70,
-        text_color=(255, 255, 255),
+        text_color=None,
         bbox=(110, 130, 1380, 220),
         rotate_cw_after_crop=False,
     ),
@@ -301,7 +301,7 @@ STYLE_TABLE: dict[str, StyleConfig] = {
         bbox=(0, 80, 1500, 240),
         rotate_cw_after_crop=False,
         filename_format="front{C}.png",
-        text_left_inset=170,
+        text_left_inset=230,
     ),
     "transform_back": StyleConfig(
         frame_pack="m15/transform/regular",
@@ -312,7 +312,7 @@ STYLE_TABLE: dict[str, StyleConfig] = {
         bbox=(0, 80, 1500, 240),
         rotate_cw_after_crop=False,
         filename_format="back{C}.png",
-        text_left_inset=170,
+        text_left_inset=230,
     ),
     "modal_dfc_front": StyleConfig(
         frame_pack="m15/transform/regular",
@@ -323,7 +323,7 @@ STYLE_TABLE: dict[str, StyleConfig] = {
         bbox=(0, 80, 1500, 240),
         rotate_cw_after_crop=False,
         filename_format="front{C}.png",
-        text_left_inset=170,
+        text_left_inset=230,
     ),
     "modal_dfc_back": StyleConfig(
         frame_pack="m15/transform/regular",
@@ -334,7 +334,7 @@ STYLE_TABLE: dict[str, StyleConfig] = {
         bbox=(0, 80, 1500, 240),
         rotate_cw_after_crop=False,
         filename_format="back{C}.png",
-        text_left_inset=170,
+        text_left_inset=230,
     ),
     "planeswalker": StyleConfig(
         frame_pack="planeswalker",
@@ -453,16 +453,22 @@ class NameRenderer:
         if cached is not None:
             return cached
         if not path.exists():
-            # Fall back: pick any available color file in the pack.
+            # Fall back: pick any color-letter PNG in the pack. Excludes
+            # thumbs, masks, and named helpers (stamp / holo / border /
+            # frame.svg-like assets) which would render as garbage if loaded
+            # as the main frame.
             pack_dir = self._frames_root / style.frame_pack
+            disallow = ("thumb", "mask", "stamp", "holo", "border", "frame")
             candidates = sorted(
-                p for p in pack_dir.glob("*.png")
-                if "thumb" not in p.name.lower() and "mask" not in p.name.lower()
+                p
+                for p in pack_dir.glob("*.png")
+                if not any(bad in p.stem.lower() for bad in disallow)
             )
             if not candidates:
                 raise FileNotFoundError(
                     f"no usable frame PNGs in {pack_dir} for style "
-                    f"{style.frame_pack!r}"
+                    f"{style.frame_pack!r} (filename {filename!r} not found, "
+                    "and no color-letter PNG fallbacks)"
                 )
             path = candidates[seed % len(candidates)]
         img = Image.open(path).convert("RGBA")

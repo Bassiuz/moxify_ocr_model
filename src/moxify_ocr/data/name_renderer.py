@@ -67,7 +67,12 @@ class StyleConfig:
     available_colors: tuple[str, ...]
     font: str
     font_size: int
-    text_color: tuple[int, int, int]
+    # Static text color override. When ``None`` (preferred), the renderer
+    # auto-picks black or white based on the mean brightness of the frame
+    # region inside ``bbox`` — that's what real card printers do, and it
+    # avoids "black text on dark frame" failures on showcase / old / DFC-back
+    # styles whose name slot is dark.
+    text_color: tuple[int, int, int] | None
     bbox: tuple[int, int, int, int]
     rotate_cw_after_crop: bool
     # Filename format for the color PNG inside the pack. ``{c}`` is the
@@ -105,7 +110,7 @@ STYLE_TABLE: dict[str, StyleConfig] = {
         available_colors=("w", "u", "b", "r", "g", "m", "a", "l"),
         font="beleren-b.ttf",
         font_size=70,
-        text_color=(0, 0, 0),
+        text_color=None,
         bbox=(110, 130, 1380, 220),
         rotate_cw_after_crop=False,
     ),
@@ -118,7 +123,7 @@ STYLE_TABLE: dict[str, StyleConfig] = {
         available_colors=("w", "u", "b", "r", "g", "m", "a", "l"),
         font="beleren-b.ttf",
         font_size=68,
-        text_color=(0, 0, 0),
+        text_color=None,
         bbox=(135, 138, 1380, 230),
         rotate_cw_after_crop=False,
     ),
@@ -127,7 +132,7 @@ STYLE_TABLE: dict[str, StyleConfig] = {
         available_colors=("w", "u", "b", "r", "g", "m", "a", "l"),
         font="beleren-b.ttf",
         font_size=70,
-        text_color=(0, 0, 0),
+        text_color=None,
         bbox=(110, 130, 1380, 220),
         rotate_cw_after_crop=False,
     ),
@@ -136,7 +141,7 @@ STYLE_TABLE: dict[str, StyleConfig] = {
         available_colors=("w", "u", "b", "r", "g", "m", "a", "l"),
         font="beleren-b.ttf",
         font_size=70,
-        text_color=(0, 0, 0),
+        text_color=None,
         bbox=(110, 130, 1380, 220),
         rotate_cw_after_crop=False,
     ),
@@ -154,7 +159,7 @@ STYLE_TABLE: dict[str, StyleConfig] = {
         available_colors=("w", "u", "b", "r", "g", "m"),
         font="beleren-b.ttf",
         font_size=70,
-        text_color=(0, 0, 0),
+        text_color=None,
         bbox=(110, 130, 1380, 220),
         rotate_cw_after_crop=False,
     ),
@@ -163,7 +168,7 @@ STYLE_TABLE: dict[str, StyleConfig] = {
         available_colors=("w", "u", "b", "r", "g", "m"),
         font="beleren-b.ttf",
         font_size=70,
-        text_color=(0, 0, 0),
+        text_color=None,
         bbox=(110, 130, 1380, 220),
         rotate_cw_after_crop=False,
     ),
@@ -182,7 +187,7 @@ STYLE_TABLE: dict[str, StyleConfig] = {
         available_colors=("w", "u", "b", "r", "g", "m", "a", "l"),
         font="matrix.ttf",
         font_size=78,
-        text_color=(0, 0, 0),
+        text_color=None,
         bbox=(110, 105, 1380, 200),
         rotate_cw_after_crop=False,
     ),
@@ -191,7 +196,7 @@ STYLE_TABLE: dict[str, StyleConfig] = {
         available_colors=("w", "u", "b", "r", "g", "m", "a", "l"),
         font="matrix.ttf",
         font_size=78,
-        text_color=(0, 0, 0),
+        text_color=None,
         bbox=(110, 105, 1380, 200),
         rotate_cw_after_crop=False,
     ),
@@ -200,7 +205,7 @@ STYLE_TABLE: dict[str, StyleConfig] = {
         available_colors=("w", "u", "b", "r", "g", "m", "a", "l", "bl"),
         font="matrix.ttf",
         font_size=82,
-        text_color=(0, 0, 0),
+        text_color=None,
         bbox=(110, 95, 1380, 200),
         rotate_cw_after_crop=False,
     ),
@@ -209,7 +214,7 @@ STYLE_TABLE: dict[str, StyleConfig] = {
         available_colors=("w", "u", "b", "r", "g", "m", "a", "l"),
         font="matrix.ttf",
         font_size=78,
-        text_color=(0, 0, 0),
+        text_color=None,
         bbox=(110, 105, 1380, 200),
         rotate_cw_after_crop=False,
     ),
@@ -218,7 +223,7 @@ STYLE_TABLE: dict[str, StyleConfig] = {
         available_colors=("white", "gray"),  # the FUT pack uses prefix names
         font="beleren-b.ttf",
         font_size=66,
-        text_color=(0, 0, 0),
+        text_color=None,
         bbox=(110, 120, 1380, 210),
         rotate_cw_after_crop=False,
     ),
@@ -228,39 +233,42 @@ STYLE_TABLE: dict[str, StyleConfig] = {
         available_colors=("w", "u", "b", "r", "g", "m", "a"),
         font="beleren-b.ttf",
         font_size=68,
-        text_color=(0, 0, 0),
+        text_color=None,
         bbox=(140, 130, 1380, 220),
         rotate_cw_after_crop=False,
     ),
+    # Battle / split frames have their name slots running sideways on the
+    # actual card. The OCR contract is that the upstream cropper pre-rotates
+    # those crops to horizontal — so what the *model* sees is a small,
+    # cramped horizontal name strip. We mimic that here by rendering on the
+    # m15 frame with a smaller font; faithful battle/split frame chrome is
+    # deferred to v2 (it requires drawing rotated text in a slot that the
+    # m15/{battle,split} frame PNGs only suggest indirectly).
     "battle": StyleConfig(
-        frame_pack="m15/battle",
-        available_colors=("w", "u", "b", "r", "g", "m", "a", "c", "l"),
+        frame_pack="m15/regular",
+        available_colors=("w", "u", "b", "r", "g", "m", "a", "l"),
         font="beleren-b.ttf",
-        font_size=70,
-        # Battle frames are rendered at 1500x2100 with the "title" strip
-        # running down the LEFT edge of the canvas. We render text into the
-        # top-left bbox in normal orientation, then rotate 90° CW so it
-        # comes out as a horizontal name strip.
-        text_color=(0, 0, 0),
-        bbox=(110, 130, 1380, 220),
+        font_size=58,
+        text_color=None,
+        bbox=(110, 140, 1380, 215),
         rotate_cw_after_crop=False,
     ),
     "split_left": StyleConfig(
-        frame_pack="m15/split",
+        frame_pack="m15/regular",
         available_colors=("w", "u", "b", "r", "g", "m", "a"),
         font="beleren-b.ttf",
-        font_size=58,
-        text_color=(0, 0, 0),
-        bbox=(110, 130, 1380, 210),
+        font_size=54,
+        text_color=None,
+        bbox=(110, 140, 1380, 215),
         rotate_cw_after_crop=False,
     ),
     "split_right": StyleConfig(
-        frame_pack="m15/split",
+        frame_pack="m15/regular",
         available_colors=("w", "u", "b", "r", "g", "m", "a"),
         font="beleren-b.ttf",
-        font_size=58,
-        text_color=(0, 0, 0),
-        bbox=(110, 1080, 1380, 1170),
+        font_size=54,
+        text_color=None,
+        bbox=(110, 140, 1380, 215),
         rotate_cw_after_crop=False,
     ),
     "adventure": StyleConfig(
@@ -268,7 +276,7 @@ STYLE_TABLE: dict[str, StyleConfig] = {
         available_colors=("w", "u", "b", "r", "g", "m", "a", "l"),
         font="beleren-b.ttf",
         font_size=70,
-        text_color=(0, 0, 0),
+        text_color=None,
         bbox=(110, 130, 1380, 220),
         rotate_cw_after_crop=False,
     ),
@@ -277,8 +285,11 @@ STYLE_TABLE: dict[str, StyleConfig] = {
         available_colors=("w", "u", "b", "r", "g", "m", "a", "l"),
         font="beleren-b.ttf",
         font_size=66,
-        text_color=(0, 0, 0),
-        bbox=(150, 130, 1380, 220),
+        text_color=None,
+        # Full top of card, x=0..CARD_W, y=80..240 — captures the
+        # transform-indicator at the top-left so the OCR sees the same
+        # context the upstream cropper feeds it.
+        bbox=(0, 80, 1500, 240),
         rotate_cw_after_crop=False,
         filename_format="front{C}.png",
     ),
@@ -287,8 +298,8 @@ STYLE_TABLE: dict[str, StyleConfig] = {
         available_colors=("w", "u", "b", "r", "g", "m", "a", "l"),
         font="beleren-b.ttf",
         font_size=66,
-        text_color=(255, 255, 255),
-        bbox=(150, 130, 1380, 220),
+        text_color=None,  # back face is dark; auto-resolves to white.
+        bbox=(0, 80, 1500, 240),
         rotate_cw_after_crop=False,
         filename_format="back{C}.png",
     ),
@@ -297,8 +308,8 @@ STYLE_TABLE: dict[str, StyleConfig] = {
         available_colors=("w", "u", "b", "r", "g", "m", "a", "l"),
         font="beleren-b.ttf",
         font_size=66,
-        text_color=(0, 0, 0),
-        bbox=(150, 130, 1380, 220),
+        text_color=None,
+        bbox=(0, 80, 1500, 240),
         rotate_cw_after_crop=False,
         filename_format="front{C}.png",
     ),
@@ -307,8 +318,8 @@ STYLE_TABLE: dict[str, StyleConfig] = {
         available_colors=("w", "u", "b", "r", "g", "m", "a", "l"),
         font="beleren-b.ttf",
         font_size=66,
-        text_color=(0, 0, 0),
-        bbox=(150, 130, 1380, 220),
+        text_color=None,
+        bbox=(0, 80, 1500, 240),
         rotate_cw_after_crop=False,
         filename_format="back{C}.png",
     ),
@@ -317,7 +328,7 @@ STYLE_TABLE: dict[str, StyleConfig] = {
         available_colors=("w", "u", "b", "r", "g", "m"),
         font="beleren-b.ttf",
         font_size=70,
-        text_color=(0, 0, 0),
+        text_color=None,
         bbox=(110, 130, 1380, 220),
         rotate_cw_after_crop=False,
     ),
@@ -326,7 +337,7 @@ STYLE_TABLE: dict[str, StyleConfig] = {
         available_colors=("w", "u", "b", "r", "g", "m", "a", "l"),
         font="beleren-b.ttf",
         font_size=64,
-        text_color=(0, 0, 0),
+        text_color=None,
         bbox=(110, 130, 1380, 220),
         rotate_cw_after_crop=False,
     ),
@@ -335,7 +346,7 @@ STYLE_TABLE: dict[str, StyleConfig] = {
         available_colors=("w", "u", "b", "r", "g", "m", "a", "l", "c"),
         font="beleren-b.ttf",
         font_size=66,
-        text_color=(0, 0, 0),
+        text_color=None,
         bbox=(110, 130, 1380, 220),
         rotate_cw_after_crop=False,
     ),
@@ -370,7 +381,8 @@ class NameRenderer:
         bg_color = _BG_PALETTE.get(spec.frame_color, _BG_PALETTE["M"])
         canvas = Image.new("RGB", (CARD_W, CARD_H), bg_color)
         canvas.paste(frame, (0, 0), frame)
-        self._draw_name(canvas, spec, style)
+        text_color = self._resolve_text_color(canvas, style)
+        self._draw_name(canvas, spec, style, text_color=text_color)
         # Crop the name region.
         crop = canvas.crop(style.bbox)
         if style.rotate_cw_after_crop:
@@ -379,6 +391,30 @@ class NameRenderer:
         crop = crop.resize((TARGET_W, TARGET_H), Image.LANCZOS)
         arr = np.asarray(crop.convert("RGB"), dtype=np.uint8)
         return arr, spec.name
+
+    @staticmethod
+    def _resolve_text_color(
+        canvas: Image.Image, style: StyleConfig
+    ) -> tuple[int, int, int]:
+        """Pick black or white text based on bbox-region brightness.
+
+        ``style.text_color`` overrides this when set. Otherwise the renderer
+        samples the canvas at the bbox region (post-frame compositing) and
+        picks the contrast color: white text on backgrounds with mean
+        luminance < 128, black text otherwise. Matches what real card
+        printers do — old/showcase/DFC-back frames with dark name slots get
+        white name text automatically.
+        """
+        if style.text_color is not None:
+            return style.text_color
+        x1, y1, x2, y2 = style.bbox
+        region = np.asarray(canvas.crop((x1, y1, x2, y2)).convert("RGB"))
+        # Rec. 709 luma weights — close enough for a contrast decision.
+        luma = float(
+            (0.2126 * region[..., 0] + 0.7152 * region[..., 1] + 0.0722 * region[..., 2])
+            .mean()
+        )
+        return (255, 255, 255) if luma < 128 else (0, 0, 0)
 
     # ---- internals ----
 
@@ -440,7 +476,12 @@ class NameRenderer:
         return rng.choice(style.available_colors)
 
     def _draw_name(
-        self, canvas: Image.Image, spec: NameSpec, style: StyleConfig
+        self,
+        canvas: Image.Image,
+        spec: NameSpec,
+        style: StyleConfig,
+        *,
+        text_color: tuple[int, int, int],
     ) -> None:
         size = max(20, int(style.font_size * spec.font_size_jitter))
         font = self._load_font(style.font, size)
@@ -462,4 +503,4 @@ class NameRenderer:
         bbox = draw.textbbox((0, 0), text, font=font)
         text_h = bbox[3] - bbox[1]
         y_off = y1 + max(0, (y2 - y1 - text_h) // 2) - bbox[1]
-        draw.text((x1 + 8, y_off), text, fill=style.text_color, font=font)
+        draw.text((x1 + 8, y_off), text, fill=text_color, font=font)

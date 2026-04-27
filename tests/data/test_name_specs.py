@@ -109,6 +109,29 @@ def test_load_card_names_filters_layouts_and_langs(tmp_path: Path) -> None:
     assert "Has©glyph" not in names
 
 
+def test_mana_cost_distribution_is_realistic() -> None:
+    """Roughly mimic real-card cost distribution: most have a cost, some don't,
+    and lengths are mostly 1-4 symbols."""
+    from collections import Counter
+
+    specs = list(generate_specs(names=_SAMPLE_NAMES, n=2000, seed=0))
+    no_cost = sum(1 for s in specs if not s.mana_cost)
+    # ~15% are land-style with no cost; allow generous slack.
+    assert 200 < no_cost < 500
+    lengths = Counter(len(s.mana_cost) for s in specs if s.mana_cost)
+    # Lengths 1-3 should be the bulk. 7+ rare but allowed.
+    assert sum(lengths[k] for k in (1, 2, 3, 4)) > 0.6 * sum(lengths.values())
+
+
+def test_mana_cost_uses_known_symbol_ids() -> None:
+    """Every emitted symbol must be a valid m21-pack id."""
+    valid = set("wubrg") | set("0123456789x")
+    specs = list(generate_specs(names=_SAMPLE_NAMES, n=500, seed=0))
+    for s in specs:
+        for sym in s.mana_cost:
+            assert sym in valid, f"unknown mana symbol id: {sym!r}"
+
+
 def test_load_card_names_dedupes() -> None:
     """A name printed in multiple sets / languages must appear only once."""
     fake = [

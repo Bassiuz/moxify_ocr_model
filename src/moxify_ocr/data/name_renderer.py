@@ -38,6 +38,16 @@ CARD_H: int = 2100
 TARGET_W: int = 512
 TARGET_H: int = 48
 
+# Diameter of mana symbols rendered into the right edge of the name region,
+# in canvas (1500x2100) pixels. Real cards print these at ~5-6% of card
+# width; we use 80px (~5.3%) as a deliberate slight under-size so a
+# 5-symbol cost doesn't crowd the name.
+_MANA_SYMBOL_PX: int = 80
+# Horizontal gap between adjacent symbols.
+_MANA_SYMBOL_GAP: int = 6
+# Inset from the right edge of the bbox to the rightmost symbol's right edge.
+_MANA_RIGHT_INSET: int = 18
+
 
 @dataclass(frozen=True)
 class StyleConfig:
@@ -384,8 +394,10 @@ class NameRenderer:
             )
         self._frames_root = root / "img" / "frames"
         self._fonts_root = root / "fonts"
+        self._mana_root = root / "img" / "manaSymbols" / "m21"
         self._font_cache: dict[tuple[str, int], ImageFont.FreeTypeFont] = {}
         self._frame_cache: dict[Path, Image.Image] = {}
+        self._mana_cache: dict[str, Image.Image] = {}
 
     def render(self, spec: NameSpec) -> tuple[np.ndarray, str]:
         """Render one ``NameSpec`` to a ``(48, 512, 3) uint8`` ndarray + label."""
@@ -394,8 +406,15 @@ class NameRenderer:
         bg_color = _BG_PALETTE.get(spec.frame_color, _BG_PALETTE["M"])
         canvas = Image.new("RGB", (CARD_W, CARD_H), bg_color)
         canvas.paste(frame, (0, 0), frame)
+        # Mana cost is painted FIRST so the name's auto-shrink logic knows
+        # how much horizontal room is left after the symbols claim the right
+        # edge. Width consumed by the cost is subtracted from the bbox's
+        # right side before computing max_w in :meth:`_draw_name`.
+        mana_width_used = self._paste_mana_cost(canvas, spec, style)
         text_color = self._resolve_text_color(canvas, style)
-        self._draw_name(canvas, spec, style, text_color=text_color)
+        self._draw_name(
+            canvas, spec, style, text_color=text_color, mana_width=mana_width_used
+        )
         # Crop the name region.
         crop = canvas.crop(style.bbox)
         if style.rotate_cw_after_crop:
@@ -494,6 +513,54 @@ class NameRenderer:
         rng = random.Random(seed)
         return rng.choice(style.available_colors)
 
+    def _paste_mana_cost(
+        self, canvas: Image.Image, spec: NameSpec, style: StyleConfig
+    ) -> int:
+        """Paste the spec's mana symbols on the right edge of the bbox.
+
+        Returns the horizontal pixel range claimed by the symbols (0 if
+        empty), so the name auto-shrink can subtract it from the bbox width
+        before computing the available text room.
+
+        Symbols are painted right-to-left so the last symbol in the cost
+        ends up rightmost — matching how mana cost is read. Centered
+        vertically in the bbox.
+        """
+        if not spec.mana_cost:
+            return 0
+        x1, y1, x2, y2 = style.bbox
+        symbols = list(spec.mana_cost)
+        n = len(symbols)
+        total_w = n * _MANA_SYMBOL_PX + (n - 1) * _MANA_SYMBOL_GAP
+        # Right edge of the rightmost symbol (canvas px).
+        right_edge = x2 - _MANA_RIGHT_INSET
+        # Top of each symbol — vertical-center inside the bbox.
+        bbox_h = y2 - y1
+        sym_top = y1 + max(0, (bbox_h - _MANA_SYMBOL_PX) // 2)
+        # Place each symbol from right to left.
+        x_cursor = right_edge - _MANA_SYMBOL_PX
+        for sym in reversed(symbols):
+            img = self._load_mana(sym)
+            canvas.paste(img, (x_cursor, sym_top), img)
+            x_cursor -= _MANA_SYMBOL_PX + _MANA_SYMBOL_GAP
+        return total_w + _MANA_RIGHT_INSET
+
+    def _load_mana(self, sym: str) -> Image.Image:
+        cached = self._mana_cache.get(sym)
+        if cached is not None:
+            return cached
+        # m21 pack: filename ``m21<sym>.png`` — sym is lowercase letter or digit.
+        path = self._mana_root / f"m21{sym}.png"
+        if not path.exists():
+            raise FileNotFoundError(f"mana symbol not found: {path}")
+        img = Image.open(path).convert("RGBA")
+        if img.size != (_MANA_SYMBOL_PX, _MANA_SYMBOL_PX):
+            img = img.resize(
+                (_MANA_SYMBOL_PX, _MANA_SYMBOL_PX), Image.LANCZOS
+            )
+        self._mana_cache[sym] = img
+        return img
+
     def _draw_name(
         self,
         canvas: Image.Image,
@@ -501,16 +568,16 @@ class NameRenderer:
         style: StyleConfig,
         *,
         text_color: tuple[int, int, int],
+        mana_width: int = 0,
     ) -> None:
         size = max(20, int(style.font_size * spec.font_size_jitter))
         font = self._load_font(style.font, size)
         draw = ImageDraw.Draw(canvas)
         x1, y1, x2, y2 = style.bbox
         text_x = x1 + style.text_left_inset
-        # Auto-shrink the font if the name doesn't fit the bbox width. Rare
-        # for normal names but real for the longest ones (e.g.
-        # "Asmoranomardicadaistinaculdacar").
-        max_w = x2 - text_x - 12
+        # Auto-shrink the font if the name doesn't fit the bbox width minus
+        # whatever the mana cost on the right edge already claimed.
+        max_w = x2 - text_x - 12 - mana_width
         text = spec.name
         while size > 24:
             bbox = draw.textbbox((0, 0), text, font=font)

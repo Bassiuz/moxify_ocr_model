@@ -135,6 +135,20 @@ _FRAME_COLOR_WEIGHTS: tuple[float, ...] = (
     0.15, 0.10, 0.10,              # M / A / L slightly under each color
 )
 
+# Mana symbol identifiers. Lowercase to match the m21-pack filenames
+# (``m21<id>.png``). The renderer treats these as opaque strings.
+_MANA_COLORED: tuple[str, ...] = ("w", "u", "b", "r", "g")
+_MANA_GENERIC: tuple[str, ...] = (
+    "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "x"
+)
+# Distribution roughly matches modern card costs (mode = 1-3).
+_MANA_GENERIC_WEIGHTS: tuple[float, ...] = (
+    0.04, 0.18, 0.22, 0.18, 0.12, 0.08, 0.05, 0.03, 0.02, 0.02, 0.06
+)
+_MANA_COLORED_COUNT_WEIGHTS: tuple[float, ...] = (
+    0.40, 0.30, 0.15, 0.10, 0.05
+)  # P(1 / 2 / 3 / 4 / 5 colored symbols)
+
 
 @dataclass(frozen=True)
 class NameSpec:
@@ -162,12 +176,41 @@ class NameSpec:
     frame_color: str
     font_size_jitter: float
     foil: bool
+    # Tuple of mana symbol ids (e.g. ``("3", "r", "r")`` → "{3}{R}{R}"). Empty
+    # for cards without a printed cost (e.g. lands). The renderer paints
+    # these on the right edge of the name region; the OCR target is still
+    # the name only — the symbols are noise the model must learn to ignore,
+    # mimicking what a real upstream cropper feeds at inference time.
+    mana_cost: tuple[str, ...] = ()
 
 
 def _weighted_choice(
     rng: random.Random, options: Sequence[str], weights: Sequence[float]
 ) -> str:
     return rng.choices(options, weights=weights, k=1)[0]
+
+
+def _random_mana_cost(rng: random.Random) -> tuple[str, ...]:
+    """Sample a plausible mana cost.
+
+    ~15% of cards have no printed cost (lands). Otherwise the cost is
+    optional generic (0/1/2/.../9/X) followed by 1-5 colored symbols, with
+    distributions tuned to look like modern playables — the long-tail of
+    rare 7-mana costs still appears, just rarely.
+    """
+    if rng.random() < 0.15:
+        return ()
+    cost: list[str] = []
+    if rng.random() < 0.60:
+        cost.append(
+            rng.choices(_MANA_GENERIC, weights=_MANA_GENERIC_WEIGHTS, k=1)[0]
+        )
+    n_colored = rng.choices(
+        [1, 2, 3, 4, 5], weights=_MANA_COLORED_COUNT_WEIGHTS, k=1
+    )[0]
+    for _ in range(n_colored):
+        cost.append(rng.choice(_MANA_COLORED))
+    return tuple(cost)
 
 
 def make_spec(*, names: Sequence[str], seed: int) -> NameSpec:
@@ -189,6 +232,7 @@ def make_spec(*, names: Sequence[str], seed: int) -> NameSpec:
         frame_color=_weighted_choice(rng, _FRAME_COLORS, _FRAME_COLOR_WEIGHTS),
         font_size_jitter=rng.uniform(0.92, 1.08),
         foil=rng.random() < 0.20,
+        mana_cost=_random_mana_cost(rng),
     )
 
 

@@ -80,6 +80,13 @@ class StyleConfig:
     # works for most packs; transform / DFC packs need ``"front{C}.png"``
     # / ``"back{C}.png"`` etc.
     filename_format: str = "{c}.png"
+    # Pixels of left-inset between ``bbox[0]`` and where the name text
+    # starts. The bbox itself can be wider than the name slot to capture
+    # surrounding context (e.g., the DFC transform-indicator on the top-
+    # left of double-faced cards). Setting this larger pushes the text past
+    # that context so it doesn't render *over* the indicator. Default 8 px
+    # matches the historical behavior for normal layouts.
+    text_left_inset: int = 8
 
 
 # Background palette per frame color. Roughly matches the dominant tone of
@@ -280,28 +287,32 @@ STYLE_TABLE: dict[str, StyleConfig] = {
         bbox=(110, 130, 1380, 220),
         rotate_cw_after_crop=False,
     ),
+    # DFC styles: the bbox captures the FULL top of the card (x=0..1500) so
+    # the transform-indicator stays in the OCR crop, but the text starts at
+    # x=170 (text_left_inset) to clear that indicator instead of rendering
+    # over it. The 170-px inset matches the real-card layout where the
+    # indicator occupies roughly the leftmost 10% of card width.
     "transform_front": StyleConfig(
         frame_pack="m15/transform/regular",
         available_colors=("w", "u", "b", "r", "g", "m", "a", "l"),
         font="beleren-b.ttf",
         font_size=66,
         text_color=None,
-        # Full top of card, x=0..CARD_W, y=80..240 — captures the
-        # transform-indicator at the top-left so the OCR sees the same
-        # context the upstream cropper feeds it.
         bbox=(0, 80, 1500, 240),
         rotate_cw_after_crop=False,
         filename_format="front{C}.png",
+        text_left_inset=170,
     ),
     "transform_back": StyleConfig(
         frame_pack="m15/transform/regular",
         available_colors=("w", "u", "b", "r", "g", "m", "a", "l"),
         font="beleren-b.ttf",
         font_size=66,
-        text_color=None,  # back face is dark; auto-resolves to white.
+        text_color=None,
         bbox=(0, 80, 1500, 240),
         rotate_cw_after_crop=False,
         filename_format="back{C}.png",
+        text_left_inset=170,
     ),
     "modal_dfc_front": StyleConfig(
         frame_pack="m15/transform/regular",
@@ -312,6 +323,7 @@ STYLE_TABLE: dict[str, StyleConfig] = {
         bbox=(0, 80, 1500, 240),
         rotate_cw_after_crop=False,
         filename_format="front{C}.png",
+        text_left_inset=170,
     ),
     "modal_dfc_back": StyleConfig(
         frame_pack="m15/transform/regular",
@@ -322,6 +334,7 @@ STYLE_TABLE: dict[str, StyleConfig] = {
         bbox=(0, 80, 1500, 240),
         rotate_cw_after_crop=False,
         filename_format="back{C}.png",
+        text_left_inset=170,
     ),
     "planeswalker": StyleConfig(
         frame_pack="planeswalker",
@@ -487,10 +500,11 @@ class NameRenderer:
         font = self._load_font(style.font, size)
         draw = ImageDraw.Draw(canvas)
         x1, y1, x2, y2 = style.bbox
+        text_x = x1 + style.text_left_inset
         # Auto-shrink the font if the name doesn't fit the bbox width. Rare
         # for normal names but real for the longest ones (e.g.
         # "Asmoranomardicadaistinaculdacar").
-        max_w = x2 - x1 - 20
+        max_w = x2 - text_x - 12
         text = spec.name
         while size > 24:
             bbox = draw.textbbox((0, 0), text, font=font)
@@ -503,4 +517,4 @@ class NameRenderer:
         bbox = draw.textbbox((0, 0), text, font=font)
         text_h = bbox[3] - bbox[1]
         y_off = y1 + max(0, (y2 - y1 - text_h) // 2) - bbox[1]
-        draw.text((x1 + 8, y_off), text, fill=text_color, font=font)
+        draw.text((text_x, y_off), text, fill=text_color, font=font)

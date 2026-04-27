@@ -48,6 +48,33 @@ _MANA_SYMBOL_GAP: int = 6
 # Inset from the right edge of the bbox to the rightmost symbol's right edge.
 _MANA_RIGHT_INSET: int = 18
 
+# Mana symbol palette. Generic (numeric / X) costs print as a grey circle
+# with a black numeral; colored mana is a tinted circle with a white inner
+# letter. These match the visual "shape vocabulary" the OCR needs to learn
+# to ignore — exact glyph fidelity to real m21 symbols isn't required.
+_MANA_FILL: dict[str, tuple[int, int, int]] = {
+    "w": (252, 246, 217),  # cream
+    "u": (170, 207, 232),  # light blue
+    "b": (170, 162, 158),  # mauve-grey (real B background)
+    "r": (244, 178, 158),  # light salmon
+    "g": (164, 207, 178),  # light green
+    # Generic costs all share the same grey.
+    "_generic": (192, 188, 180),
+}
+_MANA_INK: dict[str, tuple[int, int, int]] = {
+    "w": (40, 35, 25),
+    "u": (40, 35, 25),
+    "b": (40, 35, 25),
+    "r": (40, 35, 25),
+    "g": (40, 35, 25),
+    "_generic": (40, 35, 25),
+}
+_MANA_LABEL: dict[str, str] = {
+    "w": "W", "u": "U", "b": "B", "r": "R", "g": "G", "x": "X",
+    "0": "0", "1": "1", "2": "2", "3": "3", "4": "4",
+    "5": "5", "6": "6", "7": "7", "8": "8", "9": "9",
+}
+
 
 @dataclass(frozen=True)
 class StyleConfig:
@@ -394,7 +421,6 @@ class NameRenderer:
             )
         self._frames_root = root / "img" / "frames"
         self._fonts_root = root / "fonts"
-        self._mana_root = root / "img" / "manaSymbols" / "m21"
         self._font_cache: dict[tuple[str, int], ImageFont.FreeTypeFont] = {}
         self._frame_cache: dict[Path, Image.Image] = {}
         self._mana_cache: dict[str, Image.Image] = {}
@@ -546,18 +572,45 @@ class NameRenderer:
         return total_w + _MANA_RIGHT_INSET
 
     def _load_mana(self, sym: str) -> Image.Image:
+        """Render (and cache) a mana symbol as a tinted circle with an inner glyph.
+
+        We don't use CardConjurer's ``m21*.png`` assets directly because
+        they're white silhouettes meant to be CSS-tinted at runtime in the
+        web UI — pasting them as-is produces white blobs. Drawing here
+        instead gives us full RGBA control: a grey/coloured circle plus an
+        ink-coloured inner letter or digit drawn with a bundled font.
+        """
         cached = self._mana_cache.get(sym)
         if cached is not None:
             return cached
-        # m21 pack: filename ``m21<sym>.png`` — sym is lowercase letter or digit.
-        path = self._mana_root / f"m21{sym}.png"
-        if not path.exists():
-            raise FileNotFoundError(f"mana symbol not found: {path}")
-        img = Image.open(path).convert("RGBA")
-        if img.size != (_MANA_SYMBOL_PX, _MANA_SYMBOL_PX):
-            img = img.resize(
-                (_MANA_SYMBOL_PX, _MANA_SYMBOL_PX), Image.LANCZOS
-            )
+        is_colored = sym in _MANA_FILL and sym != "_generic"
+        fill = _MANA_FILL[sym] if is_colored else _MANA_FILL["_generic"]
+        ink = _MANA_INK[sym] if is_colored else _MANA_INK["_generic"]
+        label = _MANA_LABEL.get(sym, "?")
+
+        size = _MANA_SYMBOL_PX
+        img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        # Filled circle with a thin darker ring to mimic the printed bevel.
+        draw.ellipse([(2, 2), (size - 3, size - 3)], fill=fill)
+        ring = tuple(max(0, c - 60) for c in fill)  # subtle ring shadow
+        draw.ellipse([(2, 2), (size - 3, size - 3)], outline=ring, width=2)
+        # Inner glyph centered using a fresh ImageFont (PIL's FreeTypeFont
+        # cache misbehaves across multiple Draw contexts — "invalid
+        # reference" — so we deliberately skip the shared _font_cache
+        # for mana glyphs).
+        # plantin-semibold is close to the real-card mana glyph font; we
+        # avoid mplantin.ttf because the file ships with a malformed table
+        # that makes PIL 12 raise OSError("invalid reference") on getbbox.
+        glyph_font = ImageFont.truetype(
+            str(self._fonts_root / "plantin-semibold.otf"), int(size * 0.55)
+        )
+        bb = glyph_font.getbbox(label)
+        text_w = bb[2] - bb[0]
+        text_h = bb[3] - bb[1]
+        gx = (size - text_w) // 2 - bb[0]
+        gy = (size - text_h) // 2 - bb[1]
+        draw.text((gx, gy), label, fill=ink, font=glyph_font)
         self._mana_cache[sym] = img
         return img
 

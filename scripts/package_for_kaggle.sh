@@ -27,11 +27,12 @@ if [ ! -d "$REPO_ROOT/$POOL_DIR" ]; then
   exit 1
 fi
 
-# 1. Source zip — repo root minus heavy/local-only dirs.
+# 1. Source zip — repo root minus heavy/local-only dirs. ``-X`` strips the
+# extra-attribute fields macOS zip otherwise embeds; cleaner cross-platform.
 SRC_ZIP="$OUT_DIR/moxify-ocr-source.zip"
 rm -f "$SRC_ZIP"
 cd "$REPO_ROOT"
-zip -rq "$SRC_ZIP" . \
+zip -rqX "$SRC_ZIP" . \
   -x '.git/*' '.git' \
   -x '.venv/*' '.venv' \
   -x 'data/*' 'data' \
@@ -50,7 +51,7 @@ POOL_BASENAME="$(basename "$POOL_DIR")"
 POOL_ZIP="$OUT_DIR/moxify-ocr-name-pool-${POOL_BASENAME}.zip"
 rm -f "$POOL_ZIP"
 cd "$REPO_ROOT/$POOL_DIR"
-zip -rq "$POOL_ZIP" images/ labels.jsonl
+zip -rqX "$POOL_ZIP" images/ labels.jsonl
 echo "wrote $POOL_ZIP ($(du -h "$POOL_ZIP" | cut -f1))"
 
 cat <<EOF

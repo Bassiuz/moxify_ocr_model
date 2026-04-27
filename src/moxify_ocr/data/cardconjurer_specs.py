@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import random
+import string
 from collections.abc import Iterator
 from dataclasses import dataclass
 
@@ -23,21 +24,12 @@ _LANG_WEIGHTS = {
     "PT": 0.05, "JA": 0.07, "KO": 0.04, "ZH": 0.03, "RU": 0.01,
 }
 _RARITY_WEIGHTS = {"C": 0.50, "U": 0.30, "R": 0.15, "M": 0.04, "S": 0.005, "P": 0.005}
-# A small pool of plausible 3-4 letter set codes — enough variety without
-# pretending to be exhaustive (the OCR doesn't need to know real set semantics).
-# Note: ``10E`` appears twice on purpose — duplicates double the draw weight in
-# ``random.choice``.
-_SET_CODES = [
-    "LEA", "LEB", "2ED", "3ED", "4ED", "5ED", "6ED", "7ED", "8ED", "9ED", "10E",
-    "MIR", "VIS", "WTH", "TMP", "STH", "EXO", "USG", "ULG", "UDS", "MMQ", "NEM", "PCY",
-    "ICE", "ALL", "CSP", "TSP", "PLC", "FUT", "10E", "LRW", "MOR", "SHM", "EVE", "ALA",
-    "CON", "ARB", "ZEN", "WWK", "ROE", "M11", "SOM", "MBS", "NPH", "CMD", "M12", "ISD",
-    "DKA", "AVR", "M13", "RTR", "GTC", "DGM", "M14", "THS", "BNG", "JOU", "M15", "KTK",
-    "FRF", "DTK", "ORI", "BFZ", "OGW", "SOI", "EMN", "KLD", "AER", "AKH", "HOU", "XLN",
-    "RIX", "DOM", "M19", "GRN", "RNA", "WAR", "MH1", "M20", "ELD", "THB", "IKO", "M21",
-    "ZNR", "KHM", "STX", "MH2", "AFR", "MID", "VOW", "NEO", "SNC", "HBG", "DMU", "BRO",
-    "ONE", "MOM", "MAT", "WOE", "LCI", "MKM", "OTJ", "BIG", "MH3",
-]
+
+# Length distribution for randomly-generated set codes. Real Magic set codes
+# are 3 letters in the vast majority of cases; a few historical sets have 2
+# (LEA / LEB) or 4 (10E, MH1, MH2, etc — number-led but treated similarly).
+# We weight 3-letter heaviest to match real-world distribution.
+_SET_CODE_LENGTH_WEIGHTS = {2: 0.05, 3: 0.85, 4: 0.10}
 
 
 @dataclass(frozen=True)
@@ -59,12 +51,48 @@ def _weighted_choice(rng: random.Random, weights: dict[str, float]) -> str:
     return rng.choices(list(weights.keys()), weights=list(weights.values()), k=1)[0]
 
 
+def _gen_set_code(rng: random.Random) -> str:
+    """Generate a random 2-4 letter uppercase set code.
+
+    NOT drawn from a fixed list. The v3 model collapsed to ~0.7% set-code
+    accuracy on held-out test sets because a closed vocabulary teaches the
+    model to memorize set strings rather than read characters. Random codes
+    force character-level OCR, which generalizes to any new set.
+    """
+    length = _weighted_choice_int(rng, _SET_CODE_LENGTH_WEIGHTS)
+    return "".join(rng.choices(string.ascii_uppercase, k=length))
+
+
+def _weighted_choice_int(rng: random.Random, weights: dict[int, float]) -> int:
+    return rng.choices(list(weights.keys()), weights=list(weights.values()), k=1)[0]
+
+
 def _gen_collector_number(rng: random.Random) -> str:
-    """Most numeric NNN/NNN, some bare NNN, a few X-prefixed, occasional pre-modern."""
+    """Numeric NNN/NNN, bare NNN, X-prefixed, hyphen-separated, alpha-suffixed.
+
+    The rate-tuned distribution covers the formats that show up in real
+    Scryfall data. v3 model failures on held-out test cards traced back to
+    the synthetic data missing hyphenated and alpha-suffixed numbers.
+    """
     r = rng.random()
-    if r < 0.05:
+    if r < 0.04:
         # X-prefixed (promo): "X12", "X007"
         return f"X{rng.randint(1, 999):0{rng.choice([2, 3])}d}"
+    if r < 0.07:
+        # Hyphen-separated: "INV-23", "PMTG-007", "2025-1"
+        prefix_kind = rng.random()
+        if prefix_kind < 0.5:
+            # Letter prefix: 2-4 uppercase letters then -NN
+            prefix = "".join(rng.choices(string.ascii_uppercase, k=rng.choice([2, 3, 4])))
+            return f"{prefix}-{rng.randint(1, 99):02d}"
+        # Year prefix: 4-digit year then -N
+        year = rng.choice([2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025])
+        return f"{year}-{rng.randint(1, 9)}"
+    if r < 0.10:
+        # Alpha-suffixed variant: "042A", "118Z", "276B"
+        digits = rng.randint(1, 999)
+        suffix = rng.choice(string.ascii_uppercase)
+        return f"{digits:0{rng.choice([2, 3])}d}{suffix}"
     if r < 0.15:
         # Bare collector number: "042"
         return f"{rng.randint(1, 999):03d}"
@@ -78,7 +106,7 @@ def make_spec(seed: int) -> CardSpec:
     """Build one deterministic CardSpec from a seed."""
     rng = random.Random(seed)
     return CardSpec(
-        info_set=rng.choice(_SET_CODES),
+        info_set=_gen_set_code(rng),
         info_language=_weighted_choice(rng, _LANG_WEIGHTS),
         info_rarity=_weighted_choice(rng, _RARITY_WEIGHTS),
         info_number=_gen_collector_number(rng),

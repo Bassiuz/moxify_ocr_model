@@ -75,6 +75,7 @@ def build_crnn(
     num_classes: int = 45,
     lstm_units: int = 256,
     dropout: float = 0.2,
+    unroll: bool = False,
 ) -> Model:
     """Build the v2 CRNN: custom OCR stem → stacked 2× BiLSTM → Dense.
 
@@ -86,6 +87,14 @@ def build_crnn(
             per layer is ``2 * lstm_units``.
         dropout: Dropout rate applied before and between the recurrent layers
             and on their hidden-to-hidden connections.
+        unroll: When ``True``, build each LSTM with ``unroll=True`` so the
+            recurrent loop is expanded at graph-construction time into ``T``
+            separate cell calls. Used by the no-flex TFLite export path:
+            unrolled LSTMs produce only basic Conv/Dense/elementwise ops —
+            no while loop, no TensorList, no resource variables — which
+            conservative TFLite runtimes can load. Requires a static time
+            dimension at the recurrent input (true for our model: T=128).
+            Default ``False`` for training (much faster on GPU).
 
     Returns:
         A :class:`tf.keras.Model` whose output is ``float32[B, T, num_classes]``
@@ -109,15 +118,20 @@ def build_crnn(
     # (B, 1, W/4, 256) → (B, W/4, 256)
     x = SqueezeHeight(name="squeeze_h")(x)
 
-    # Recurrent sequence modeling.
+    # Recurrent sequence modeling. Per-layer ``dropout`` is dropped when
+    # unroll=True because Keras's unrolled LSTM doesn't support dropout
+    # masks inside the unroll (and we only unroll for inference export).
     x = layers.Dropout(dropout, name="pre_rnn_dropout")(x)
+    lstm_kwargs = {"return_sequences": True, "unroll": unroll}
+    if not unroll:
+        lstm_kwargs["dropout"] = dropout
     x = layers.Bidirectional(
-        layers.LSTM(lstm_units, return_sequences=True, dropout=dropout),
+        layers.LSTM(lstm_units, **lstm_kwargs),
         name="bilstm_1",
     )(x)
     x = layers.Dropout(dropout, name="inter_rnn_dropout")(x)
     x = layers.Bidirectional(
-        layers.LSTM(lstm_units, return_sequences=True, dropout=dropout),
+        layers.LSTM(lstm_units, **lstm_kwargs),
         name="bilstm_2",
     )(x)
 

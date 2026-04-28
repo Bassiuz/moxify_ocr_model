@@ -70,27 +70,46 @@ def main() -> int:
     print(f"  input: {model.input_shape}  output: {model.output_shape}")
 
     if args.no_flex:
-        # Build a NEW Keras model whose input layer has a fixed batch dim
-        # of 1, and reuse the existing trained submodel as a callable inside.
-        # With static batch the LSTM's TensorList element_shape resolves to
-        # ``(1, hidden_size)`` at conversion time and TFLite can lower it
-        # to the UnidirectionalSequenceLSTM builtin — no Flex delegate
-        # needed at runtime, at the cost of forcing single-image inference.
-        from moxify_ocr.models.name_region import NAME_INPUT_SHAPE  # noqa: PLC0415
+        # Rebuild the model with ``unroll=True`` LSTMs and a fixed batch
+        # of 1, then copy the trained weights over. With T=128 statically
+        # known, the recurrent loop expands at graph-construction into
+        # 128 separate cell invocations — no while_loop, no TensorList,
+        # no resource variables. The resulting TFLite graph uses only
+        # basic ops (Conv/Dense/Add/Mul/Sigmoid/Tanh/Reshape) that load
+        # cleanly on conservative runtimes like LiteRT 1.4.x and iOS
+        # TensorFlowLiteSwift 2.12.0. Trade-off: graph is bigger
+        # (~50-80 MB) and inference is single-image (batch=1).
+        from moxify_ocr.models.crnn import build_crnn  # noqa: PLC0415
+        from moxify_ocr.models.name_region import (  # noqa: PLC0415
+            NAME_INPUT_SHAPE,
+            NAME_NUM_CLASSES,
+        )
 
+        unrolled = build_crnn(
+            input_shape=NAME_INPUT_SHAPE,
+            num_classes=NAME_NUM_CLASSES,
+            lstm_units=256,
+            unroll=True,
+        )
+        # Materialize variables with a forward pass, then copy weights.
+        unrolled(tf.zeros((1, *NAME_INPUT_SHAPE), dtype=tf.uint8), training=False)
+        unrolled.set_weights(model.get_weights())
+        print(
+            f"  rebuilt with unroll=True; copied {len(unrolled.weights)} weight tensors"
+        )
+
+        # Wrap in a fixed-batch input layer so the entire graph is shape-static.
         fixed_input = tf.keras.Input(
             batch_shape=(1, *NAME_INPUT_SHAPE), dtype=tf.uint8, name="image"
         )
-        fixed_output = model(fixed_input)
-        fixed_batch_model = tf.keras.Model(fixed_input, fixed_output, name="name_v1_b1")
-        print(
-            f"  fixed-batch model: input={fixed_batch_model.input_shape} "
-            f"output={fixed_batch_model.output_shape}"
+        fixed_output = unrolled(fixed_input)
+        fixed_batch_model = tf.keras.Model(
+            fixed_input, fixed_output, name="name_v1_b1_unrolled"
         )
 
         converter = tf.lite.TFLiteConverter.from_keras_model(fixed_batch_model)
         converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS]
-        print("no-flex mode: batch pinned to 1, builtins-only target")
+        print("no-flex mode: batch pinned to 1, unrolled LSTMs, builtins-only target")
     else:
         converter = tf.lite.TFLiteConverter.from_keras_model(model)
         # Our CRNN has BiLSTM cells whose ``TensorListReserve`` ops can't be
@@ -116,6 +135,42 @@ def main() -> int:
     args.out.write_bytes(tflite_bytes)
     size_mb = len(tflite_bytes) / 1_048_576
     print(f"wrote {args.out}  ({size_mb:.2f} MB)")
+
+    # Verify the op set so we don't ship a "no-flex" model that still has
+    # WHILE / resource-variable ops (which conservative runtimes like
+    # LiteRT 1.4.x and iOS TensorFlowLiteSwift 2.12.0 won't load). Always
+    # report; in --no-flex mode raise if any forbidden op slipped in.
+    from collections import Counter
+
+    interp = tf.lite.Interpreter(model_path=str(args.out))
+    op_counts = Counter(o["op_name"] for o in interp._get_ops_details())
+    print("op set:")
+    for name, c in sorted(op_counts.items()):
+        print(f"  {name}: {c}")
+
+    if args.no_flex:
+        forbidden = {
+            "WHILE",
+            "VAR_HANDLE",
+            "READ_VARIABLE",
+            "ASSIGN_VARIABLE",
+            "CALL_ONCE",
+        }
+        bad = forbidden & set(op_counts.keys())
+        if bad:
+            raise SystemExit(
+                f"--no-flex export contains ops conservative runtimes won't "
+                f"load: {sorted(bad)}. The LSTM didn't fold to "
+                f"UNIDIRECTIONAL_SEQUENCE_LSTM. Try the unroll path."
+            )
+        if "UNIDIRECTIONAL_SEQUENCE_LSTM" not in op_counts:
+            print(
+                "WARN: no UNIDIRECTIONAL_SEQUENCE_LSTM op found — model may "
+                "have unrolled the LSTM into FULLY_CONNECTED ops, which is "
+                "fine but produces a larger graph than the fused builtin."
+            )
+        else:
+            print("✓ LSTM folded to UNIDIRECTIONAL_SEQUENCE_LSTM builtin")
     return 0
 
 

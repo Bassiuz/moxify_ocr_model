@@ -46,6 +46,14 @@ def main() -> int:
         "halves the file size; runtime activations stay float. No calibration "
         "data needed.",
     )
+    parser.add_argument(
+        "--no-flex",
+        action="store_true",
+        help="Try to convert WITHOUT Select-TF ops by pinning batch=1 via a "
+        "concrete tf.function signature. Lets the LSTM's TensorList "
+        "element shape resolve to static. Use when the consumer's TFLite "
+        "runtime can't ship the Flex delegate (e.g. LiteRT-only Android).",
+    )
     args = parser.parse_args()
 
     if not args.keras.exists():
@@ -61,19 +69,40 @@ def main() -> int:
     )
     print(f"  input: {model.input_shape}  output: {model.output_shape}")
 
-    converter = tf.lite.TFLiteConverter.from_keras_model(model)
+    if args.no_flex:
+        # Build a NEW Keras model whose input layer has a fixed batch dim
+        # of 1, and reuse the existing trained submodel as a callable inside.
+        # With static batch the LSTM's TensorList element_shape resolves to
+        # ``(1, hidden_size)`` at conversion time and TFLite can lower it
+        # to the UnidirectionalSequenceLSTM builtin — no Flex delegate
+        # needed at runtime, at the cost of forcing single-image inference.
+        from moxify_ocr.models.name_region import NAME_INPUT_SHAPE  # noqa: PLC0415
 
-    # Our CRNN has BiLSTM cells whose ``TensorListReserve`` ops can't be
-    # lowered to TFLite builtins without a static element shape. The
-    # standard fix is to keep those ops as Select-TF (Flex) ops, which
-    # the TFLite runtime supports as long as the consumer bundles the
-    # Flex delegate. This is the recommended path for RNN-based OCR.
-    base_ops = [
-        tf.lite.OpsSet.TFLITE_BUILTINS,
-        tf.lite.OpsSet.SELECT_TF_OPS,
-    ]
-    converter.target_spec.supported_ops = base_ops
-    converter._experimental_lower_tensor_list_ops = False
+        fixed_input = tf.keras.Input(
+            batch_shape=(1, *NAME_INPUT_SHAPE), dtype=tf.uint8, name="image"
+        )
+        fixed_output = model(fixed_input)
+        fixed_batch_model = tf.keras.Model(fixed_input, fixed_output, name="name_v1_b1")
+        print(
+            f"  fixed-batch model: input={fixed_batch_model.input_shape} "
+            f"output={fixed_batch_model.output_shape}"
+        )
+
+        converter = tf.lite.TFLiteConverter.from_keras_model(fixed_batch_model)
+        converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS]
+        print("no-flex mode: batch pinned to 1, builtins-only target")
+    else:
+        converter = tf.lite.TFLiteConverter.from_keras_model(model)
+        # Our CRNN has BiLSTM cells whose ``TensorListReserve`` ops can't be
+        # lowered to TFLite builtins without a static element shape. The
+        # standard fix is to keep those ops as Select-TF (Flex) ops, which
+        # the TFLite runtime supports as long as the consumer bundles the
+        # Flex delegate. This is the recommended path for RNN-based OCR.
+        converter.target_spec.supported_ops = [
+            tf.lite.OpsSet.TFLITE_BUILTINS,
+            tf.lite.OpsSet.SELECT_TF_OPS,
+        ]
+        converter._experimental_lower_tensor_list_ops = False
 
     if args.quantize:
         # Dynamic-range quantization: weights → int8, activations stay

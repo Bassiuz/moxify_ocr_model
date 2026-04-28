@@ -49,12 +49,24 @@ def main() -> int:
     parser.add_argument(
         "--no-flex",
         action="store_true",
-        help="Try to convert WITHOUT Select-TF ops by pinning batch=1 via a "
-        "concrete tf.function signature. Lets the LSTM's TensorList "
-        "element shape resolve to static. Use when the consumer's TFLite "
-        "runtime can't ship the Flex delegate (e.g. LiteRT-only Android).",
+        help="Convert without Select-TF ops. Default sub-mode (--modern, "
+        "implicit) produces a small model that needs a current-gen TFLite "
+        "runtime (modern LiteRT / flutter_litert) — uses WHILE + resource-"
+        "variable builtins for the LSTM, modern op versions, smallest size. "
+        "Pass --legacy-runtime to instead unroll the LSTM and clamp op "
+        "versions to v3 for older runtimes (TFLiteSwift 2.12, LiteRT 1.4.x).",
+    )
+    parser.add_argument(
+        "--legacy-runtime",
+        action="store_true",
+        help="With --no-flex: unroll the LSTM + clamp quantization op "
+        "versions to v3 for compat with TFLiteSwift 2.12.0 / LiteRT 1.4.x. "
+        "Bigger graph (~5 MB vs ~2 MB), uses only basic builtins. Skip this "
+        "if you're on flutter_litert / current-gen LiteRT.",
     )
     args = parser.parse_args()
+    if args.legacy_runtime and not args.no_flex:
+        raise SystemExit("--legacy-runtime requires --no-flex")
 
     if not args.keras.exists():
         raise SystemExit(f"missing keras model: {args.keras}")
@@ -70,46 +82,60 @@ def main() -> int:
     print(f"  input: {model.input_shape}  output: {model.output_shape}")
 
     if args.no_flex:
-        # Rebuild the model with ``unroll=True`` LSTMs and a fixed batch
-        # of 1, then copy the trained weights over. With T=128 statically
-        # known, the recurrent loop expands at graph-construction into
-        # 128 separate cell invocations — no while_loop, no TensorList,
-        # no resource variables. The resulting TFLite graph uses only
-        # basic ops (Conv/Dense/Add/Mul/Sigmoid/Tanh/Reshape) that load
-        # cleanly on conservative runtimes like LiteRT 1.4.x and iOS
-        # TensorFlowLiteSwift 2.12.0. Trade-off: graph is bigger
-        # (~50-80 MB) and inference is single-image (batch=1).
-        from moxify_ocr.models.crnn import build_crnn  # noqa: PLC0415
-        from moxify_ocr.models.name_region import (  # noqa: PLC0415
-            NAME_INPUT_SHAPE,
-            NAME_NUM_CLASSES,
-        )
+        from moxify_ocr.models.name_region import NAME_INPUT_SHAPE  # noqa: PLC0415
 
-        unrolled = build_crnn(
-            input_shape=NAME_INPUT_SHAPE,
-            num_classes=NAME_NUM_CLASSES,
-            lstm_units=256,
-            unroll=True,
-        )
-        # Materialize variables with a forward pass, then copy weights.
-        unrolled(tf.zeros((1, *NAME_INPUT_SHAPE), dtype=tf.uint8), training=False)
-        unrolled.set_weights(model.get_weights())
-        print(
-            f"  rebuilt with unroll=True; copied {len(unrolled.weights)} weight tensors"
-        )
+        if args.legacy_runtime:
+            # Legacy-runtime path: rebuild the model with ``unroll=True``
+            # LSTMs and a fixed batch of 1. With T=128 statically known,
+            # the recurrent loop expands at graph-construction into 128
+            # separate cell invocations — no while_loop, no TensorList, no
+            # resource variables. Loads cleanly on TFLiteSwift 2.12.0 /
+            # LiteRT 1.4.x. Trade-off: graph is bigger (~5 MB quantized
+            # vs ~2 MB modern); inference is single-image (batch=1).
+            from moxify_ocr.models.crnn import build_crnn  # noqa: PLC0415
+            from moxify_ocr.models.name_region import (  # noqa: PLC0415
+                NAME_NUM_CLASSES,
+            )
 
-        # Wrap in a fixed-batch input layer so the entire graph is shape-static.
-        fixed_input = tf.keras.Input(
-            batch_shape=(1, *NAME_INPUT_SHAPE), dtype=tf.uint8, name="image"
-        )
-        fixed_output = unrolled(fixed_input)
-        fixed_batch_model = tf.keras.Model(
-            fixed_input, fixed_output, name="name_v1_b1_unrolled"
-        )
+            unrolled = build_crnn(
+                input_shape=NAME_INPUT_SHAPE,
+                num_classes=NAME_NUM_CLASSES,
+                lstm_units=256,
+                unroll=True,
+            )
+            unrolled(tf.zeros((1, *NAME_INPUT_SHAPE), dtype=tf.uint8), training=False)
+            unrolled(tf.zeros((1, *NAME_INPUT_SHAPE), dtype=tf.uint8), training=False)
+            unrolled.set_weights(model.get_weights())
+            print(
+                f"  rebuilt with unroll=True; copied {len(unrolled.weights)} weight tensors"
+            )
+            fixed_input = tf.keras.Input(
+                batch_shape=(1, *NAME_INPUT_SHAPE), dtype=tf.uint8, name="image"
+            )
+            target_model = tf.keras.Model(
+                fixed_input, unrolled(fixed_input), name="name_v1_b1_unrolled"
+            )
+            print(
+                "no-flex/legacy-runtime: batch=1, unrolled, v3-clamped quant"
+            )
+        else:
+            # Modern-runtime path: keep the BiLSTM as-is (no unroll). The
+            # converter implements it via WHILE + VAR_HANDLE / READ_VARIABLE
+            # / ASSIGN_VARIABLE / TensorList ops — all TFLite builtins, but
+            # at op versions that current-gen LiteRT / flutter_litert
+            # supports natively. Smaller, faster graph than the unrolled
+            # path. Inputs still pinned to batch=1 to match the on-device
+            # one-shot inference contract.
+            fixed_input = tf.keras.Input(
+                batch_shape=(1, *NAME_INPUT_SHAPE), dtype=tf.uint8, name="image"
+            )
+            target_model = tf.keras.Model(
+                fixed_input, model(fixed_input), name="name_v1_b1_modern"
+            )
+            print("no-flex/modern: batch=1, dynamic LSTM, builtins-only target")
 
-        converter = tf.lite.TFLiteConverter.from_keras_model(fixed_batch_model)
+        converter = tf.lite.TFLiteConverter.from_keras_model(target_model)
         converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS]
-        print("no-flex mode: batch pinned to 1, unrolled LSTMs, builtins-only target")
     else:
         converter = tf.lite.TFLiteConverter.from_keras_model(model)
         # Our CRNN has BiLSTM cells whose ``TensorListReserve`` ops can't be
@@ -130,8 +156,8 @@ def main() -> int:
         # the Flex delegate to run the LSTM during calibration).
         converter.optimizations = [tf.lite.Optimize.DEFAULT]
         print("dynamic-range quantization enabled (weight-only int8)")
-        if args.no_flex:
-            # Compat-mode quantization: use the legacy dynamic-range
+        if args.no_flex and args.legacy_runtime:
+            # Legacy-runtime quantization: use the legacy dynamic-range
             # quantizer + per-tensor (not per-channel) scales. This pulls
             # CONV_2D / FULLY_CONNECTED op versions down from v5/v12 to
             # v2/v3, which TFLite runtimes from the 2.12-2.16 era ship
@@ -140,7 +166,7 @@ def main() -> int:
             # 1.4.x reject with "Unable to create interpreter".
             converter.experimental_new_dynamic_range_quantizer = False
             converter._experimental_disable_per_channel = True
-            print("  + compat quantization (legacy dyn-range + per-tensor scales)")
+            print("  + legacy quantization (legacy dyn-range + per-tensor scales)")
 
     tflite_bytes = converter.convert()
     args.out.write_bytes(tflite_bytes)
@@ -179,7 +205,11 @@ def main() -> int:
         marker = "" if v == 1 else f"  v{v}"
         print(f"  {name}: count={op_counts[name]}{marker}")
 
-    if args.no_flex:
+    if args.no_flex and args.legacy_runtime:
+        # The legacy-runtime path must NOT contain control-flow / resource-
+        # variable ops (the unrolled LSTM avoids them by design). It must
+        # also keep op versions ≤ v3 to fit TFLiteSwift 2.12.0 / LiteRT
+        # 1.4.x's kernel registry.
         forbidden = {
             "WHILE",
             "VAR_HANDLE",
@@ -190,16 +220,12 @@ def main() -> int:
         bad = forbidden & set(op_counts.keys())
         if bad:
             raise SystemExit(
-                f"--no-flex export contains ops conservative runtimes won't "
-                f"load: {sorted(bad)}. The LSTM didn't fold to "
-                f"UNIDIRECTIONAL_SEQUENCE_LSTM. Try the unroll path."
+                f"--legacy-runtime export contains ops older runtimes won't "
+                f"load: {sorted(bad)}. The LSTM didn't unroll cleanly."
             )
         max_v = max(op_versions.values())
-        # Ops above this threshold may be too new for older runtimes
-        # (iOS TFLiteSwift 2.12 supports through ~v7 for most ops; LiteRT
-        # 1.4.x supports through ~v9). v3 is comfortably within both.
         if max_v <= 3:
-            print(f"✓ all op versions ≤ v{max_v} — broadly compatible")
+            print(f"✓ all op versions ≤ v{max_v} — TFLiteSwift 2.12 / LiteRT 1.4.x compatible")
         else:
             high = sorted(
                 f"{name}:v{v}" for name, v in op_versions.items() if v > 3
@@ -208,6 +234,18 @@ def main() -> int:
                 f"WARN: max op version v{max_v} (high: {high}). "
                 "May not load on TFLiteSwift 2.12 / LiteRT 1.4.x — test before ship."
             )
+    elif args.no_flex:
+        # Modern-runtime path: WHILE / resource-variable ops are EXPECTED
+        # and fine on current-gen LiteRT / flutter_litert. We only flag
+        # SELECT_TF_OPS leakage (which would mean Flex is needed after all).
+        if "FlexOp" in op_counts or any("Flex" in n for n in op_counts):
+            raise SystemExit(
+                "--no-flex export still contains Select-TF / Flex ops"
+            )
+        print(
+            f"✓ modern-runtime export: max op v{max(op_versions.values())} — "
+            "requires current-gen LiteRT / flutter_litert (no Flex needed)"
+        )
     return 0
 
 

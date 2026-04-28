@@ -130,23 +130,54 @@ def main() -> int:
         # the Flex delegate to run the LSTM during calibration).
         converter.optimizations = [tf.lite.Optimize.DEFAULT]
         print("dynamic-range quantization enabled (weight-only int8)")
+        if args.no_flex:
+            # Compat-mode quantization: use the legacy dynamic-range
+            # quantizer + per-tensor (not per-channel) scales. This pulls
+            # CONV_2D / FULLY_CONNECTED op versions down from v5/v12 to
+            # v2/v3, which TFLite runtimes from the 2.12-2.16 era ship
+            # kernels for. Without these knobs the converter emits
+            # FULLY_CONNECTED:v12 which iOS TFLiteSwift 2.12 / LiteRT
+            # 1.4.x reject with "Unable to create interpreter".
+            converter.experimental_new_dynamic_range_quantizer = False
+            converter._experimental_disable_per_channel = True
+            print("  + compat quantization (legacy dyn-range + per-tensor scales)")
 
     tflite_bytes = converter.convert()
     args.out.write_bytes(tflite_bytes)
     size_mb = len(tflite_bytes) / 1_048_576
     print(f"wrote {args.out}  ({size_mb:.2f} MB)")
 
-    # Verify the op set so we don't ship a "no-flex" model that still has
-    # WHILE / resource-variable ops (which conservative runtimes like
-    # LiteRT 1.4.x and iOS TensorFlowLiteSwift 2.12.0 won't load). Always
-    # report; in --no-flex mode raise if any forbidden op slipped in.
+    # Verify the op set + op versions so we don't ship a model that an
+    # older TFLite runtime can't load. Two failure modes worth catching:
+    # (a) forbidden op kinds (WHILE / resource variables / TensorList),
+    # (b) op versions newer than the consumer's runtime supports.
     from collections import Counter
+
+    from tensorflow.lite.python import schema_py_generated as schema_fb  # noqa: PLC0415
 
     interp = tf.lite.Interpreter(model_path=str(args.out))
     op_counts = Counter(o["op_name"] for o in interp._get_ops_details())
-    print("op set:")
-    for name, c in sorted(op_counts.items()):
-        print(f"  {name}: {c}")
+    # Versions live in the FlatBuffer's operator_codes table.
+    with args.out.open("rb") as f:
+        flatbuf = f.read()
+    fb_model = schema_fb.Model.GetRootAsModel(flatbuf, 0)
+    op_versions: dict[str, int] = {}
+    for i in range(fb_model.OperatorCodesLength()):
+        oc = fb_model.OperatorCodes(i)
+        name = next(
+            (
+                k
+                for k, v in vars(schema_fb.BuiltinOperator).items()
+                if v == oc.BuiltinCode()
+            ),
+            f"UNK({oc.BuiltinCode()})",
+        )
+        op_versions[name] = max(op_versions.get(name, 0), oc.Version())
+    print("op set + versions:")
+    for name in sorted(op_counts):
+        v = op_versions.get(name, 1)
+        marker = "" if v == 1 else f"  v{v}"
+        print(f"  {name}: count={op_counts[name]}{marker}")
 
     if args.no_flex:
         forbidden = {
@@ -163,14 +194,20 @@ def main() -> int:
                 f"load: {sorted(bad)}. The LSTM didn't fold to "
                 f"UNIDIRECTIONAL_SEQUENCE_LSTM. Try the unroll path."
             )
-        if "UNIDIRECTIONAL_SEQUENCE_LSTM" not in op_counts:
-            print(
-                "WARN: no UNIDIRECTIONAL_SEQUENCE_LSTM op found — model may "
-                "have unrolled the LSTM into FULLY_CONNECTED ops, which is "
-                "fine but produces a larger graph than the fused builtin."
-            )
+        max_v = max(op_versions.values())
+        # Ops above this threshold may be too new for older runtimes
+        # (iOS TFLiteSwift 2.12 supports through ~v7 for most ops; LiteRT
+        # 1.4.x supports through ~v9). v3 is comfortably within both.
+        if max_v <= 3:
+            print(f"✓ all op versions ≤ v{max_v} — broadly compatible")
         else:
-            print("✓ LSTM folded to UNIDIRECTIONAL_SEQUENCE_LSTM builtin")
+            high = sorted(
+                f"{name}:v{v}" for name, v in op_versions.items() if v > 3
+            )
+            print(
+                f"WARN: max op version v{max_v} (high: {high}). "
+                "May not load on TFLiteSwift 2.12 / LiteRT 1.4.x — test before ship."
+            )
     return 0
 
 

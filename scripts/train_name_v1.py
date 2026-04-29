@@ -137,12 +137,16 @@ def main() -> int:
         return encode_label(label, alphabet=NAME_ALPHABET)
 
     batch_size = int(cfg["data"]["batch_size"])
+    augment = bool(cfg["data"].get("augment", False))
+    if augment:
+        print("augmentation enabled (photo-realistic synth→real gap bridge)")
     train_ds = build_tf_dataset(
         train_pool,
         encode_fn=encode,
         batch_size=batch_size,
         shuffle_buffer=int(cfg["data"]["shuffle_buffer"]),
         repeat=True,  # required when model.fit gets steps_per_epoch
+        augment=augment,
         seed=seed,
     )
     val_ds = build_tf_dataset(
@@ -151,6 +155,7 @@ def main() -> int:
         batch_size=batch_size,
         shuffle_buffer=0,
         repeat=False,  # val must iterate each sample exactly once per epoch
+        augment=False,  # val never augments — measures generalization, not robustness
         seed=seed,
     )
 

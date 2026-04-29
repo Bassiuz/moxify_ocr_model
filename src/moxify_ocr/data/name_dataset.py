@@ -99,6 +99,7 @@ def build_tf_dataset(
     batch_size: int,
     shuffle_buffer: int,
     repeat: bool = False,
+    augment: bool = False,
     seed: int = 0,
 ) -> "tf.data.Dataset":  # noqa: F821 — quoted; tf imported lazily to keep this module light
     """Build a `tf.data.Dataset` of `(image_uint8, label_dense_int32)` batches.
@@ -114,6 +115,12 @@ def build_tf_dataset(
     epoch 2 and silently no-ops the remaining epochs. Validation pipelines
     must stay finite (``repeat=False``) so end-of-epoch evaluation iterates
     each val sample once.
+
+    Set ``augment=True`` to apply the photometric/geometric augmentation
+    pipeline from :mod:`moxify_ocr.data.name_augment` per sample before it
+    reaches the model. Bridges the synthetic-real gap measured on the v1
+    shipped model (99.74% real-world CER vs. 0.03% synthetic-val CER). Only
+    enable for train; val should stay deterministic.
 
     The dense label tensor is zero-padded to the max length in each batch
     (zero is the CTC blank, also doubling as padding — the loss strips it).
@@ -147,6 +154,32 @@ def build_tf_dataset(
     ds = ds.map(_load, num_parallel_calls=tf.data.AUTOTUNE)
     if repeat:
         ds = ds.repeat()
+    if augment:
+        # Albumentations runs in numpy / Python — wrap via tf.numpy_function.
+        # Per-sample seed derived from the global step to keep determinism in
+        # the face of shuffle + repeat.
+        from moxify_ocr.data.name_augment import (  # noqa: PLC0415
+            apply_name_augmentation,
+            build_name_augmentation_pipeline,
+        )
+
+        pipeline = build_name_augmentation_pipeline(seed=seed)
+        step_counter = tf.Variable(0, trainable=False, dtype=tf.int64)
+
+        def _augment_py(img_np: np.ndarray, step: int) -> np.ndarray:
+            return apply_name_augmentation(
+                img_np, pipeline, seed=int(step) ^ seed
+            )
+
+        def _augment_tf(
+            img_t: "tf.Tensor", lbl_t: "tf.Tensor"
+        ) -> tuple["tf.Tensor", "tf.Tensor"]:
+            step = step_counter.assign_add(1)
+            aug = tf.numpy_function(_augment_py, [img_t, step], tf.uint8)
+            aug.set_shape([48, 512, 3])
+            return aug, lbl_t
+
+        ds = ds.map(_augment_tf, num_parallel_calls=tf.data.AUTOTUNE)
     ds = ds.batch(batch_size, drop_remainder=False)
     ds = ds.prefetch(tf.data.AUTOTUNE)
     return ds

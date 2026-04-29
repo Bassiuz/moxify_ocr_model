@@ -1,0 +1,27 @@
+# v1.5 config — name OCR with photo-realistic augmentation enabled.
+#
+# v1 trained on clean synthetic crops (val_cer = 3.4e-4) but measured 99.74%
+# CER on real screen-captured frames during the Moxify scan-loop test —
+# textbook synthetic-real gap with the model emitting mostly empty strings
+# / single hallucinated capitals (CTC converged into blank-when-uncertain).
+#
+# v1.5 turns on the augmentation pipeline in moxify_ocr.data.name_augment
+# during training: perspective skew, brightness/contrast, JPEG compression,
+# blur, color cast, random shadows (monitor glare), random downscale. Bridges
+# screen-photo input distribution to the synthetic train distribution.
+#
+# Same renderer + same pool as v1 — we don't re-render. Just retrain with
+# augmentation flipped on.
+data:
+  pool_root: data/synth_names/v1
+  val_fraction: 0.10
+  batch_size: 128
+  shuffle_buffer: 4096
+  augment: true                          # ← the only meaningful change vs v1
+
+train:
+  epochs: 30                             # bumped from 25 — augmentation makes overfit slower
+  lr: 5.0e-4
+  warmup_steps: 2000
+  seed: 0
+  output_dir: artifacts/name_v15

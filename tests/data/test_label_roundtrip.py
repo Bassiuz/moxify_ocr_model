@@ -14,7 +14,12 @@ from pathlib import Path
 import pytest
 
 from moxify_ocr.data.dataset import encode_label
-from moxify_ocr.data.labels import LANG_CODE, _salvage_plst_fields, make_label
+from moxify_ocr.data.labels import (
+    LANG_CODE,
+    _salvage_plst_fields,
+    _salvage_promo_set_code,
+    make_label,
+)
 from moxify_ocr.data.manifest import read_manifest
 from moxify_ocr.export.parse_bottom import parse_bottom
 
@@ -48,6 +53,9 @@ def test_roundtrip_on_real_manifest() -> None:
         card_for_salvage = {"set": e.set_code, "collector_number": e.collector_number}
         salvaged_set, _, _ = _salvage_plst_fields(card_for_salvage)
         known_set_codes.add(salvaged_set.upper())
+        # Also include promo-salvaged codes (FJMP→JMP etc) so parse_bottom can
+        # match them when comparing predictions.
+        known_set_codes.add(_salvage_promo_set_code(salvaged_set).upper())
     known_languages = set(LANG_CODE.values())
 
     for entry in entries:
@@ -76,10 +84,13 @@ def test_roundtrip_on_real_manifest() -> None:
             known_languages=known_languages,
         )
 
-        # Compute expected fields accounting for PLST salvage.
+        # Compute expected fields accounting for PLST salvage AND promo salvage
+        # (FJMP→JMP, PONE→ONE etc — Scryfall's prefixed promo/memorabilia codes
+        # vs the actual code printed on the card).
         expected_set, expected_num, is_list = _salvage_plst_fields(
             {"set": entry.set_code, "collector_number": entry.collector_number}
         )
+        expected_set = _salvage_promo_set_code(expected_set)
         if not _ROUND_TRIPPABLE_NUMBER.match(expected_num):
             # Non-digit collector numbers (e.g. "46★" prerelease promo,
             # foreign glyph-suffixed) don't round-trip cleanly through the

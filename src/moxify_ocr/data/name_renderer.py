@@ -630,7 +630,11 @@ class NameRenderer:
         font = self._load_font(style.font, size)
         draw = ImageDraw.Draw(canvas)
         x1, y1, x2, y2 = style.bbox
-        text_x = x1 + style.text_left_inset
+        # Add per-spec horizontal jitter on top of the style's static inset.
+        # Forces the model to learn that the first character can land at any
+        # x-position, not at a fixed left margin (the v1.5 first-character-
+        # bias was driven by the absence of this jitter).
+        text_x = x1 + style.text_left_inset + spec.text_x_jitter
         # Auto-shrink the font if the name doesn't fit the bbox width minus
         # whatever the mana cost on the right edge already claimed.
         max_w = x2 - text_x - 12 - mana_width

@@ -182,6 +182,15 @@ class NameSpec:
     # the name only — the symbols are noise the model must learn to ignore,
     # mimicking what a real upstream cropper feeds at inference time.
     mana_cost: tuple[str, ...] = ()
+    # Pixel offset added to the rendered text's left x-position, in
+    # canvas (1500x2100) coordinates. Sampled per-spec from approximately
+    # [-25, +25]. Without this jitter the v1 model learned that the first
+    # character ALWAYS starts at a fixed left margin, then on real-world
+    # crops (where the upstream cropper doesn't always nail the exact
+    # left edge) the model hallucinates a phantom prefix character. The
+    # 13/58 wrong-top-1 cases on the v1.5 real-world test set had this
+    # exact failure mode.
+    text_x_jitter: int = 0
 
 
 def _weighted_choice(
@@ -213,6 +222,36 @@ def _random_mana_cost(rng: random.Random) -> tuple[str, ...]:
     return tuple(cost)
 
 
+# Length threshold below which a name counts as "short" for the
+# oversampling pass. ~10% of real card names are short; v1.5 model
+# struggled with these (Murder / Holy Day / Opt / Shock / Ovinize all
+# wrong on the real-world test set). Oversampling lifts short-name
+# exposure during training so the model doesn't shortcut on the assumption
+# that names are always 12+ chars.
+SHORT_NAME_MAX_LEN: int = 10
+# Probability of drawing from the short-name sub-pool when both pools
+# exist. Real prior is ~0.10; we boost to 0.30 so short names get the
+# 3× exposure they need to overcome the long-tail bias.
+SHORT_NAME_OVERSAMPLE_P: float = 0.30
+
+
+def _pick_name(rng: random.Random, names: Sequence[str]) -> str:
+    """Sample a name with short-name oversampling.
+
+    Splits ``names`` into short (≤ :data:`SHORT_NAME_MAX_LEN` chars) and
+    normal pools. With probability :data:`SHORT_NAME_OVERSAMPLE_P` (0.30)
+    draws from short; otherwise from normal. If either pool is empty
+    falls back to uniform over all names.
+    """
+    short = [n for n in names if len(n) <= SHORT_NAME_MAX_LEN]
+    normal = [n for n in names if len(n) > SHORT_NAME_MAX_LEN]
+    if not short or not normal:
+        return rng.choice(names)
+    if rng.random() < SHORT_NAME_OVERSAMPLE_P:
+        return rng.choice(short)
+    return rng.choice(normal)
+
+
 def make_spec(*, names: Sequence[str], seed: int) -> NameSpec:
     """Build one deterministic :class:`NameSpec` from ``seed``.
 
@@ -223,7 +262,7 @@ def make_spec(*, names: Sequence[str], seed: int) -> NameSpec:
         raise ValueError("names pool is empty")
     rng = random.Random(seed)
     return NameSpec(
-        name=rng.choice(names),
+        name=_pick_name(rng, names),
         style=_weighted_choice(
             rng,
             list(STYLE_WEIGHTS.keys()),
@@ -233,6 +272,7 @@ def make_spec(*, names: Sequence[str], seed: int) -> NameSpec:
         font_size_jitter=rng.uniform(0.92, 1.08),
         foil=rng.random() < 0.20,
         mana_cost=_random_mana_cost(rng),
+        text_x_jitter=rng.randint(-25, 25),
     )
 
 

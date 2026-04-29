@@ -29,7 +29,10 @@ model:
   lstm_units: 256                          # carried over from v2 (stacked BiLSTM stem)
 
 train:
-  epochs: 50                               # bumped from v2's 30 — bigger synthetic pool overfits more slowly
+  epochs: 100                              # bumped from 50 — paired with patience=15 below, this gives ~85 epochs
+                                           # of "real training room" before EarlyStopping naturally fires. v3_v1
+                                           # converged at epoch 30 with patience=5; the harder random-set-codes
+                                           # task in v3_v2 expects ~1.5-2x more epochs to converge.
   lr: 5.0e-4
   warmup_steps: 2000                       # bumped from 1000 — synthetic CTC loss benefits from longer warmup
   early_stopping_patience: 15              # bumped from default 5 — random set codes (vs the prior closed list)

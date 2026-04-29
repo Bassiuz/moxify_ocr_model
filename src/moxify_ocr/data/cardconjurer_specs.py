@@ -18,6 +18,12 @@ import string
 from collections.abc import Iterator
 from dataclasses import dataclass
 
+from moxify_ocr.data._real_set_codes import (
+    CHAR_FREQ,
+    REAL_LENGTH_FREQ,
+    REAL_SET_CODES,
+)
+
 # Realistic distributions tuned to match what the manifest already contains.
 _LANG_WEIGHTS = {
     "EN": 0.45, "DE": 0.10, "FR": 0.10, "ES": 0.08, "IT": 0.07,
@@ -25,11 +31,17 @@ _LANG_WEIGHTS = {
 }
 _RARITY_WEIGHTS = {"C": 0.50, "U": 0.30, "R": 0.15, "M": 0.04, "S": 0.005, "P": 0.005}
 
-# Length distribution for randomly-generated set codes. Real Magic set codes
-# are 3 letters in the vast majority of cases; a few historical sets have 2
-# (LEA / LEB) or 4 (10E, MH1, MH2, etc — number-led but treated similarly).
-# We weight 3-letter heaviest to match real-world distribution.
-_SET_CODE_LENGTH_WEIGHTS = {2: 0.05, 3: 0.85, 4: 0.10}
+# Probability of drawing a real Scryfall code (vs frequency-weighted random).
+# Hybrid sampling balances: 70% real → train distribution matches production
+# letter/digit/length patterns; 30% random → forces character-level OCR for
+# generalization to future sets Wizards hasn't shipped yet.
+_REAL_SET_CODE_PROB = 0.70
+
+# Pre-compute the random-set-code parameters so we don't rebuild them per spec.
+_RANDOM_LENGTH_KEYS = list(REAL_LENGTH_FREQ.keys())
+_RANDOM_LENGTH_WEIGHTS = list(REAL_LENGTH_FREQ.values())
+_RANDOM_CHAR_KEYS = list(CHAR_FREQ.keys())
+_RANDOM_CHAR_WEIGHTS = list(CHAR_FREQ.values())
 
 
 @dataclass(frozen=True)
@@ -52,19 +64,26 @@ def _weighted_choice(rng: random.Random, weights: dict[str, float]) -> str:
 
 
 def _gen_set_code(rng: random.Random) -> str:
-    """Generate a random 2-4 letter uppercase set code.
+    """Generate a hybrid set code: 70% real Scryfall code, 30% weighted-random.
 
-    NOT drawn from a fixed list. The v3 model collapsed to ~0.7% set-code
-    accuracy on held-out test sets because a closed vocabulary teaches the
-    model to memorize set strings rather than read characters. Random codes
-    force character-level OCR, which generalizes to any new set.
+    The v3_v1 model used a closed list of ~104 codes and collapsed to 0.7%
+    test set_code_accuracy because it memorized strings. v3_v2 used pure
+    uniform-random alpha codes and reached only 23% — the visual letter
+    distribution didn't match real cards (uniform vs reality's heavy P/T/M),
+    none of the codes were alphanumeric (vs real's 33% with-digit rate),
+    and length was ~85% 3-char (vs reality's 43% 3-char / 54% 4-char).
+
+    This hybrid fixes all three: 70% of synthetic codes are pulled directly
+    from REAL_SET_CODES (1031 entries; matches reality exactly in length,
+    character, and alphanumeric distribution); 30% are random codes whose
+    length and characters are weighted by ``REAL_LENGTH_FREQ`` and
+    ``CHAR_FREQ`` (so even random codes look plausibly Magic-shaped).
     """
-    length = _weighted_choice_int(rng, _SET_CODE_LENGTH_WEIGHTS)
-    return "".join(rng.choices(string.ascii_uppercase, k=length))
-
-
-def _weighted_choice_int(rng: random.Random, weights: dict[int, float]) -> int:
-    return rng.choices(list(weights.keys()), weights=list(weights.values()), k=1)[0]
+    if rng.random() < _REAL_SET_CODE_PROB:
+        return rng.choice(REAL_SET_CODES)
+    length = rng.choices(_RANDOM_LENGTH_KEYS, weights=_RANDOM_LENGTH_WEIGHTS, k=1)[0]
+    chars = rng.choices(_RANDOM_CHAR_KEYS, weights=_RANDOM_CHAR_WEIGHTS, k=length)
+    return "".join(chars)
 
 
 def _gen_collector_number(rng: random.Random) -> str:

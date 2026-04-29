@@ -11,6 +11,8 @@ import re
 from datetime import date
 from typing import Any
 
+from moxify_ocr.data._real_set_codes import PROMO_SALVAGE
+
 # Scryfall rarity string → printed letter on card.
 # "special" and "bonus" are intentionally absent — those cards don't print a
 # distinct letter on the bottom-left.
@@ -130,6 +132,7 @@ def make_label(card: dict[str, Any], is_foil: bool) -> str:
     Unsupported language codes will raise :class:`KeyError` — by design.
     """
     set_code, number, is_the_list = _salvage_plst_fields(card)
+    set_code = _salvage_promo_set_code(set_code)
 
     # Line 1: [planeswalker icon] <num>[/<total>] [<rarity letter>]
     line1_parts: list[str] = []
@@ -154,3 +157,22 @@ def make_label(card: dict[str, Any], is_foil: bool) -> str:
     line2 = f"{set_code.upper()} {foil_glyph} {lang_code}"
 
     return f"{line1}\n{line2}"
+
+
+def _salvage_promo_set_code(set_code: str) -> str:
+    """Translate Scryfall's promo-prefixed codes (FJMP, PONE) to the printed code.
+
+    Scryfall internally distinguishes promo / memorabilia variants of a base
+    set with prefixed codes — FJMP is "Jumpstart Front Cards", PONE is
+    "Phyrexia: All Will Be One Promos", etc. — but the cards themselves print
+    the *parent* set's code (JMP, ONE) plus a small variant indicator. Manifest
+    audit confirmed the OCR sees the parent code, so train labels must too.
+
+    Looks up ``set_code`` in :data:`PROMO_SALVAGE` (built from sets.json:
+    set_type ∈ {promo, memorabilia} that have a ``parent_set_code``). If
+    present, returns the parent code; otherwise returns the input unchanged.
+
+    Alchemy (Y*) and other digital-only sets are deliberately NOT in the
+    salvage table — they don't appear in physical card OCR.
+    """
+    return PROMO_SALVAGE.get(set_code.upper(), set_code)

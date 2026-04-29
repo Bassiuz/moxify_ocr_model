@@ -282,3 +282,64 @@ def test_planeswalker_icon_is_private_use_area() -> None:
     assert PLANESWALKER_ICON == ""
     assert len(PLANESWALKER_ICON) == 1
     assert 0xE000 <= ord(PLANESWALKER_ICON) <= 0xF8FF
+
+
+def test_make_label_salvages_fjmp_to_jmp() -> None:
+    """FJMP is Scryfall's 'Jumpstart Front Cards' (memorabilia type) — cards
+    physically print JMP. Manifest audit (2026-04-29) confirmed."""
+    card = _card(
+        collector_number="42",
+        printed_size=None,
+        rarity="rare",
+        set_code="fjmp",
+        lang="en",
+        type_line="Creature — Beast",
+        released_at="2020-07-17",
+    )
+    label = make_label(card, is_foil=False)
+    assert label.endswith("\nJMP • EN"), f"expected JMP after salvage, got {label!r}"
+
+
+def test_make_label_salvages_pone_to_one() -> None:
+    """PONE is Scryfall's 'Phyrexia: All Will Be One Promos' — printed as ONE."""
+    card = _card(
+        collector_number="103",
+        printed_size=None,
+        rarity="rare",
+        set_code="pone",
+        lang="en",
+        type_line="Creature — Phyrexian",
+        released_at="2023-02-03",
+    )
+    label = make_label(card, is_foil=False)
+    assert label.endswith("\nONE • EN"), f"expected ONE after salvage, got {label!r}"
+
+
+def test_make_label_does_not_salvage_real_base_set() -> None:
+    """PCY is a real base set ('Prophecy') with no parent — must NOT be salvaged."""
+    card = _card(
+        collector_number="100",
+        printed_size=143,
+        rarity="rare",
+        set_code="pcy",
+        lang="en",
+        type_line="Creature",
+        released_at="2000-06-05",
+    )
+    label = make_label(card, is_foil=False)
+    assert "PCY" in label, f"PCY (real expansion) must not be salvaged: {label!r}"
+
+
+def test_make_label_does_not_salvage_alchemy() -> None:
+    """Alchemy (Y* prefix) is digital-only and not in PROMO_SALVAGE — pass through."""
+    card = _card(
+        collector_number="42",
+        printed_size=None,
+        rarity="rare",
+        set_code="yecl",
+        lang="en",
+        type_line="Creature",
+        released_at="2025-01-01",
+    )
+    label = make_label(card, is_foil=False)
+    assert "YECL" in label, f"alchemy code must pass through: {label!r}"

@@ -32,5 +32,10 @@ train:
   epochs: 50                               # bumped from v2's 30 — bigger synthetic pool overfits more slowly
   lr: 5.0e-4
   warmup_steps: 2000                       # bumped from 1000 — synthetic CTC loss benefits from longer warmup
+  early_stopping_patience: 15              # bumped from default 5 — random set codes (vs the prior closed list)
+                                           # produce a noisier val_cer trajectory; the v3-spec-improvements run
+                                           # bounced 0.51 ↔ 0.61 across epochs 4-9 and was killed before reaching
+                                           # the deeper minimum. 15 gives noisy convergence room without disabling
+                                           # the safety entirely.
   seed: 0
   output_dir: artifacts/bottom_region_v3

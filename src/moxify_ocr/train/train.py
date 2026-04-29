@@ -188,12 +188,13 @@ def main(argv: list[str] | None = None) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     best_path = output_dir / "best.keras"
 
+    early_stopping_patience = int(cfg["train"].get("early_stopping_patience", 15))
     callbacks: list[tf.keras.callbacks.Callback] = [
         CERCallback(val_ds),
         tf.keras.callbacks.EarlyStopping(
             monitor="val_cer",
             mode="min",
-            patience=5,
+            patience=early_stopping_patience,
             restore_best_weights=True,
         ),
         tf.keras.callbacks.ModelCheckpoint(

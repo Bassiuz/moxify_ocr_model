@@ -87,38 +87,64 @@ def _gen_set_code(rng: random.Random) -> str:
 
 
 def _gen_collector_number(rng: random.Random) -> str:
-    """Numeric NNN/NNN, bare NNN, X-prefixed, hyphen-separated, alpha-suffixed.
+    """Generate a collector-number string with realistic format distribution.
 
-    The rate-tuned distribution covers the formats that show up in real
-    Scryfall data. v3 model failures on held-out test cards traced back to
-    the synthetic data missing hyphenated and alpha-suffixed numbers.
+    Targets, derived from real Scryfall labels post-:func:`make_label`
+    (n=26298): bare digits 54%, slash-total 30%, digit+alpha suffix 10%,
+    hyphen 0.2%, other 5.7%. The earlier 85%-slash-total distribution
+    inverted reality and traced directly to the v3 set-code accuracy
+    plateau on JMP / ECL / CMR / OLGC cards (all 100% bare-digits in test).
+
+    The synth distribution here oversamples the rare-but-important formats
+    (hyphen, X-prefix, year-suffix) above their literal real-world rates so
+    the model gets enough exposure to learn them. Bare digits are the
+    dominant majority class to match real data.
+
+    Why: the bottom-strip layout shifts visibly when the collector token is
+    short (bare "401") vs long ("184/302") — different empty-space pattern,
+    different relative position of the set code on the next line. The model
+    has to learn both layouts; previous synth pool only taught the long one.
     """
     r = rng.random()
-    if r < 0.04:
-        # X-prefixed (promo): "X12", "X007"
+    if r < 0.01:
+        # Year + alpha suffix promo: "2018NA", "2019A", "2018B"
+        year = rng.choice([2017, 2018, 2019, 2020, 2021])
+        return f"{year}{rng.choice(['NA', 'A', 'B'])}"
+    if r < 0.02:
+        # X-prefixed promo: "X12", "X007"
         return f"X{rng.randint(1, 999):0{rng.choice([2, 3])}d}"
-    if r < 0.07:
+    if r < 0.05:
+        # 4-digit zero-padded (TMT-style): "0064", "0001", "1234"
+        return f"{rng.randint(1, 9999):04d}"
+    if r < 0.10:
         # Hyphen-separated: "INV-23", "PMTG-007", "2025-1"
         prefix_kind = rng.random()
         if prefix_kind < 0.5:
-            # Letter prefix: 2-4 uppercase letters then -NN
             prefix = "".join(rng.choices(string.ascii_uppercase, k=rng.choice([2, 3, 4])))
             return f"{prefix}-{rng.randint(1, 99):02d}"
-        # Year prefix: 4-digit year then -N
         year = rng.choice([2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025])
         return f"{year}-{rng.randint(1, 9)}"
-    if r < 0.10:
+    if r < 0.20:
         # Alpha-suffixed variant: "042A", "118Z", "276B"
         digits = rng.randint(1, 999)
         suffix = rng.choice(string.ascii_uppercase)
         return f"{digits:0{rng.choice([2, 3])}d}{suffix}"
-    if r < 0.15:
-        # Bare collector number: "042"
+    if r < 0.45:
+        # Slash-total: "147/280", "401/420" — modern main-set with printed_size.
+        total = rng.choice([100, 150, 200, 250, 277, 280, 302, 350, 420, 500])
+        num = rng.randint(1, total)
+        return f"{num:03d}/{total:03d}"
+    # Bare digits — dominant real-world format (~55%). Mix of widths and
+    # zero-padding to mirror the variety in real prints (e.g. JMP "401",
+    # ECL "293", PT "61", DOM "043").
+    width = rng.choices([1, 2, 3], weights=[0.05, 0.20, 0.75], k=1)[0]
+    if width == 1:
+        return str(rng.randint(1, 9))
+    if width == 2:
+        return str(rng.randint(10, 99))
+    if rng.random() < 0.5:
         return f"{rng.randint(1, 999):03d}"
-    # Numeric NNN/NNN — by far the common case.
-    total = rng.choice([100, 150, 200, 250, 277, 280, 302, 350])
-    num = rng.randint(1, total)
-    return f"{num:03d}/{total:03d}"
+    return str(rng.randint(1, 999))
 
 
 def make_spec(seed: int) -> CardSpec:

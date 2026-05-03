@@ -105,14 +105,28 @@ def test_generate_specs_yields_n_specs() -> None:
 
 
 def test_collector_number_formats_are_diverse() -> None:
-    """Realistic distribution: most numeric, a few X-prefixed, some no /total."""
-    specs = list(generate_specs(n=500, seed=0))
+    """Distribution should favor bare digits, with slash-total a minority.
+
+    Real Scryfall labels (post make_label) are ~54% bare-digits, ~30%
+    slash-total, ~10% alpha-suffix. The previous 85%-slash distribution
+    caused the v3 set-code accuracy plateau on bare-digit-format sets
+    (JMP, ECL, CMR, OLGC).
+    """
+    specs = list(generate_specs(n=2000, seed=0))
     has_slash = sum("/" in s.info_number for s in specs)
-    has_x = sum(s.info_number.upper().startswith("X") for s in specs)
-    # Majority should have /total (matches modern manifest distribution).
-    assert has_slash > 200
-    # X-prefix is rare but must exist (>0, <10% so not over-represented).
-    assert 0 < has_x < 50
+    bare_digit = sum(s.info_number.isdigit() for s in specs)
+    has_x = sum(s.info_number.upper().startswith("X") and s.info_number[1:].isdigit() for s in specs)
+    # Bare digits should be the dominant format (~55% target, allow ±10pp).
+    assert 900 < bare_digit < 1300, (
+        f"bare-digit count {bare_digit}/2000 outside expected ~1100 ±200 — "
+        "real-world distribution is bare-digit dominant"
+    )
+    # Slash-total is a substantial minority (~25% target, allow ±10pp).
+    assert 300 < has_slash < 700, (
+        f"slash-total count {has_slash}/2000 outside expected ~500 ±200"
+    )
+    # X-prefix stays rare but present.
+    assert 0 < has_x < 100
 
 
 def test_collector_numbers_include_hyphen_format() -> None:

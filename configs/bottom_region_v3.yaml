@@ -16,7 +16,7 @@ data:
   min_release: "2008-01-01"
 
   # Synthetic legs — together they account for 100% of train samples.
-  cardconjurer_pool: data/synth_cardconjurer/v3_100k
+  cardconjurer_pool: data/synth_cardconjurer/v3_v4_100k
   cardconjurer_ratio: 0.70                # majority leg — high-fidelity rendered crops
   line_compositor_ratio: 0.30             # complement — real-half stitcher for distribution coverage
   # Implicit: real-data leg ratio is 1.0 - 0.70 - 0.30 = 0.0 → never fires on train.
